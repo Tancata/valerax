@@ -41,6 +41,10 @@ public:
     (void)(highways);
   }
 
+  // Declare a whole-genome duplication at the top of a species branch, with
+  // retention probability q. No-op for models that do not implement WGD.
+  virtual void setWGD(unsigned int /*speciesNode*/, double /*q*/) {}
+
   virtual double computeLogLikelihood() = 0;
 
   virtual bool inferMLScenario(Scenario &scenario) = 0;

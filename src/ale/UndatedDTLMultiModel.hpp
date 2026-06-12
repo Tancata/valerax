@@ -29,6 +29,15 @@ public:
   virtual void setRates(const RatesVector &rates);
   virtual void setHighways(const std::vector<Highway> &highways);
 
+  // --- WGD extension ---
+  // Declare a WGD at the top of species branch e with retention prob q.
+  void setWGD(unsigned int e, double q) override {
+    _hasWGD[e] = 1;
+    _q[e] = q;
+    this->invalidateAllSpeciesNodes();
+    this->resetCache();
+  }
+
 private:
   DatedTree &_datedTree;
   unsigned int _gammaCatNumber;
@@ -43,6 +52,10 @@ private:
   std::vector<double> _OP; // Origination probability, per species branch
   std::vector<REAL> _uE;   // Extinction probability, per species branch
   std::vector<REAL> _tE; // Transfer-extinction probability, per species branch
+  // --- WGD extension ---
+  std::vector<char> _hasWGD; // per species branch: WGD at top of branch?
+  std::vector<double> _q;    // per species branch: retention prob (if WGD)
+  std::vector<REAL> _uEtop;  // extinction seen by the PARENT, per (e,cat)
   OriginationStrategy _originationStrategy;
   TransferConstaint _transferConstraint;
   // Forbidden transfers, per species branch
@@ -59,10 +72,14 @@ private:
     // after its transfer from the species branch e to some other branch.
     // In the paper: \bar{Pi}_{e,gamma} of a clade gamma for each branch e
     std::vector<REAL> _tq;
-    DTLCLV() : _uq(0), _tq(0) {}
+    // Post-WGD clade CLV seen by the PARENT: equals _uq on branches without a
+    // WGD, and the WHALE retention transform of _uq on branches that carry one.
+    std::vector<REAL> _uqTop;
+    DTLCLV() : _uq(0), _tq(0), _uqTop(0) {}
     DTLCLV(unsigned int speciesNumber, unsigned int gammaCategories)
         : _uq(speciesNumber * gammaCategories, REAL()),
-          _tq(speciesNumber * gammaCategories, REAL()) {}
+          _tq(speciesNumber * gammaCategories, REAL()),
+          _uqTop(speciesNumber * gammaCategories, REAL()) {}
   };
   // vector of DTLCLVs for all observed clades
   std::vector<DTLCLV> _dtlclvs;
@@ -122,6 +139,10 @@ UndatedDTLMultiModel<REAL>::UndatedDTLMultiModel(
       _originationStrategy(info.originationStrategy),
       _transferConstraint(info.transferConstraint) {
   auto N = this->getAllSpeciesNodeNumber();
+  // --- WGD extension: per-branch state, no WGD by default ---
+  _hasWGD.assign(N, 0);
+  _q.assign(N, 1.0);
+  _uEtop.assign(N * _gammaCatNumber, REAL());
   // set gamma scalers with the default alpha
   setAlpha(1.0);
   // set all DTLO rates to the default value
@@ -205,8 +226,10 @@ template <class REAL> void UndatedDTLMultiModel<REAL>::deallocateMemory() {
 template <class REAL> void UndatedDTLMultiModel<REAL>::updateCLV(CID cid) {
   auto &uq = _dtlclvs[cid]._uq;
   auto &tq = _dtlclvs[cid]._tq;
+  auto &uqTop = _dtlclvs[cid]._uqTop;
   std::fill(uq.begin(), uq.end(), REAL());
   std::fill(tq.begin(), tq.end(), REAL());
+  std::fill(uqTop.begin(), uqTop.end(), REAL());
   // iterate several times to resolve the DL and TL terms with
   // fixed point optimization: not needed if we don't model TL
   unsigned int maxIt = this->_info.noTL ? 1 : 4;
@@ -222,7 +245,29 @@ template <class REAL> void UndatedDTLMultiModel<REAL>::updateCLV(CID cid) {
         ok = computeProbability(cid, speciesNode, c, p);
         assert(ok);
         transferSum += p;
-        uq[ec] = p;
+        uq[ec] = p; // raw P_e(gamma)
+        // --- clade CLV seen by the parent (WHALE DLWGD retention transform) ---
+        // P_top = (1-q) P + q [ 2 E P + split ]; q=0 recovers no-WGD. Uses raw
+        // own-branch quantities (_uE[ec], sub-clade _uq[ec]); transfer reads
+        // stay raw because a transferred lineage lands below the WGD.
+        if (_hasWGD[e]) {
+          double q = _q[e];
+          REAL pe = p;
+          REAL split = REAL();
+          for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+            REAL t = _dtlclvs[cs.left]._uq[ec] * _dtlclvs[cs.right]._uq[ec] *
+                     cs.frequency;
+            scale(t);
+            split += t;
+          }
+          REAL keep = pe * (1.0 - q);                  // (1-q) P
+          REAL dup = (_uE[ec] * pe * 2.0 + split) * q; // q [2 E P + split]
+          scale(keep);
+          scale(dup);
+          uqTop[ec] = keep + dup;
+        } else {
+          uqTop[ec] = p;
+        }
       }
       // now that we've got the clade proba on every species branch,
       // we can compute the clade transfer probas
@@ -375,6 +420,7 @@ void UndatedDTLMultiModel<REAL>::recomputeSpeciesProbabilities() {
   updateTransferCandidates();
   std::fill(_uE.begin(), _uE.end(), REAL());
   std::fill(_tE.begin(), _tE.end(), REAL());
+  std::fill(_uEtop.begin(), _uEtop.end(), REAL());
   // iterate several times to resolve _uE and _tE probas with
   // fixed point optimization
   unsigned int maxIt = 4;
@@ -398,14 +444,15 @@ void UndatedDTLMultiModel<REAL>::recomputeSpeciesProbabilities() {
           auto g = this->getSpeciesRight(speciesNode)->node_index;
           auto fc = f * _gammaCatNumber + c;
           auto gc = g * _gammaCatNumber + c;
-          temp = _uE[fc] * _uE[gc] * _PS[ec]; // SEE scenario
+          // read children's POST-WGD extinction (_uEtop)
+          temp = _uEtop[fc] * _uEtop[gc] * _PS[ec]; // SEE scenario
         } else {
           // terminal branch
           temp = REAL(_PS[ec] * this->_fm[e]); // S but not observed scenario
         }
         scale(temp);
         proba += temp;
-        // DEE scenario
+        // DEE scenario (own branch, below WGD -> raw _uE)
         temp = _uE[ec] * _uE[ec] * _PD[ec];
         scale(temp);
         proba += temp;
@@ -424,6 +471,21 @@ void UndatedDTLMultiModel<REAL>::recomputeSpeciesProbabilities() {
         assert(proba < REAL(1.000001));
         extinctionSum += proba;
         _uE[ec] = proba;
+        // --- post-WGD extinction seen by the parent (WHALE DLWGD form) ---
+        // E_top = (1-q) E + q E^2; q=0 recovers the no-WGD model. The transfer
+        // extinction _tE keeps reading the raw _uE (a transferred lineage lands
+        // within the destination branch, below its WGD).
+        if (_hasWGD[e]) {
+          double q = _q[e];
+          REAL e1 = _uE[ec];           // E
+          REAL term1 = e1 * (1.0 - q);  // (1-q) E
+          REAL term2 = e1 * e1 * q;     // q E^2
+          scale(term1);
+          scale(term2);
+          _uEtop[ec] = term1 + term2;
+        } else {
+          _uEtop[ec] = _uE[ec];
+        }
       }
       // now that we've got extinction probas for every species branch,
       // we can compute transfer-extinction probas
@@ -558,7 +620,7 @@ bool UndatedDTLMultiModel<REAL>::computeProbability(
     auto freq = cladeSplit.frequency;
     // - S event on an internal species branch
     if (!isSpeciesLeaf) {
-      temp = _dtlclvs[cidLeft]._uq[fc] * _dtlclvs[cidRight]._uq[gc] *
+      temp = _dtlclvs[cidLeft]._uqTop[fc] * _dtlclvs[cidRight]._uqTop[gc] *
              (_PS[ec] * freq);
       scale(temp);
       proba += temp;
@@ -570,7 +632,7 @@ bool UndatedDTLMultiModel<REAL>::computeProbability(
         recCell->blRight = cladeSplit.blRight;
         return true;
       }
-      temp = _dtlclvs[cidRight]._uq[fc] * _dtlclvs[cidLeft]._uq[gc] *
+      temp = _dtlclvs[cidRight]._uqTop[fc] * _dtlclvs[cidLeft]._uqTop[gc] *
              (_PS[ec] * freq);
       scale(temp);
       proba += temp;
@@ -675,7 +737,7 @@ bool UndatedDTLMultiModel<REAL>::computeProbability(
   // for any of gene nodes:
   // - SL event (only on an internal species branch)
   if (!isSpeciesLeaf) {
-    temp = _dtlclvs[cid]._uq[fc] * (_uE[gc] * _PS[ec]);
+    temp = _dtlclvs[cid]._uqTop[fc] * (_uEtop[gc] * _PS[ec]);
     scale(temp);
     proba += temp;
     if (recCell && proba > maxProba) {
@@ -685,7 +747,7 @@ bool UndatedDTLMultiModel<REAL>::computeProbability(
       recCell->event.pllLostSpeciesNode = this->getSpeciesRight(speciesNode);
       return true;
     }
-    temp = _dtlclvs[cid]._uq[gc] * (_uE[fc] * _PS[ec]);
+    temp = _dtlclvs[cid]._uqTop[gc] * (_uEtop[fc] * _PS[ec]);
     scale(temp);
     proba += temp;
     if (recCell && proba > maxProba) {

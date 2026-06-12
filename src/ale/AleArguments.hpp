@@ -1,6 +1,21 @@
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "IO/ArgumentsHelper.hpp"
+
+/**
+ *  A whole-genome duplication declared on the command line.
+ *  The WGD is placed at the top of the branch leading to the node identified by
+ *  `labels`: a single taxon label selects that terminal branch; two taxon
+ *  labels select the branch leading to their LCA (mirrors WHALE's
+ *  insertnode-at-LCA). `q0` is the starting retention probability.
+ */
+struct WGDDeclaration {
+  std::vector<std::string> labels; // 1 or 2 taxon labels
+  double q0;                       // starting retention probability
+};
 
 /**
  *  Parses and stores the program arguments
@@ -53,6 +68,9 @@ public:
   // input data
   std::string families;
   std::string speciesTree;
+
+  // whole-genome duplications declared via --wgd
+  std::vector<WGDDeclaration> wgds;
 
   // model
   std::string reconciliationModelStr;

@@ -106,6 +106,19 @@ public:
   void setFamilyParameters(unsigned int family, const Parameters &parameters);
 
   /**
+   *  Declare a whole-genome duplication at the top of a species branch (by
+   *  node index) with retention probability q, and broadcast it to every local
+   *  family evaluation. The branch is registered so the retention optimizer can
+   *  later sweep its q. Calling this again for the same branch just updates q.
+   */
+  void setWGD(unsigned int speciesNode, double q);
+
+  /**
+   *  The species branches (node indices) on which a WGD has been declared.
+   */
+  const std::vector<unsigned int> &getWGDNodes() const { return _wgdNodes; }
+
+  /**
    *  Optimize the model rates
    */
   virtual double optimizeModelRates(bool thorough);
@@ -207,6 +220,11 @@ private:
   // evaluations for local families
   PerCoreMultiEvaluations _evaluations;
   PerCoreMultiEvaluations _approxEvaluations;
+  // species branches (node indices) carrying a declared WGD, and the current
+  // retention probability of each (aligned with _wgdNodes; used as the warm
+  // start for the retention optimizer)
+  std::vector<unsigned int> _wgdNodes;
+  std::vector<double> _wgdQ;
   std::vector<int> _highPrecisions;
   // LL buffer for global families
   std::vector<double> _snapshotPerFamilyLL;

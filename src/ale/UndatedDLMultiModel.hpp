@@ -18,6 +18,15 @@ public:
   virtual void setAlpha(double alpha);
   virtual void setRates(const RatesVector &rates);
 
+  // --- WGD extension ---
+  // Declare a WGD at the top of species branch e with retention prob q.
+  void setWGD(unsigned int e, double q) override {
+    _hasWGD[e] = 1;
+    _q[e] = q;
+    this->invalidateAllSpeciesNodes();
+    this->resetCache();
+  }
+
 private:
   unsigned int _gammaCatNumber;
   std::vector<double> _gammaScalers;
@@ -35,6 +44,12 @@ private:
   using DLCLV = std::vector<REAL>;
   // vector of DLCLVs for all observed clades
   std::vector<DLCLV> _dlclvs;
+
+  // --- WGD extension ---
+  std::vector<char> _hasWGD;     // per species branch: WGD at top of branch?
+  std::vector<double> _q;        // per species branch: retention prob (if WGD)
+  std::vector<REAL> _uEtop;      // extinction seen by PARENT, per (e,cat)
+  std::vector<DLCLV> _dlclvsTop; // clade CLV seen by PARENT, per clade per (e,cat)
 
   // functions to work with CLVs
   virtual void allocateMemory();
@@ -72,6 +87,12 @@ UndatedDLMultiModel<REAL>::UndatedDLMultiModel(
       _uE(this->getAllSpeciesNodeNumber() * _gammaCatNumber, REAL()),
       _originationStrategy(info.originationStrategy) {
   auto N = this->getAllSpeciesNodeNumber();
+  // --- WGD extension: per-branch state, no WGD by default ---
+  auto Nc = N * _gammaCatNumber;
+  _hasWGD.assign(N, 0);
+  _q.assign(N, 1.0);
+  _uEtop.assign(Nc, REAL());
+  // _dlclvsTop is allocated alongside _dlclvs in allocateMemory()
   // set gamma scalers with the default alpha
   setAlpha(1.0);
   // set all DLO rates to the default value
@@ -104,6 +125,7 @@ void UndatedDLMultiModel<REAL>::setRates(const RatesVector &rates) {
 template <class REAL> void UndatedDLMultiModel<REAL>::allocateMemory() {
   DLCLV nullCLV(this->getAllSpeciesNodeNumber() * _gammaCatNumber, REAL());
   _dlclvs = std::vector<DLCLV>(this->_ccp.getCladesNumber(), nullCLV);
+  _dlclvsTop = std::vector<DLCLV>(this->_ccp.getCladesNumber(), nullCLV);
 }
 
 /**
@@ -111,6 +133,7 @@ template <class REAL> void UndatedDLMultiModel<REAL>::allocateMemory() {
  */
 template <class REAL> void UndatedDLMultiModel<REAL>::deallocateMemory() {
   _dlclvs = std::vector<DLCLV>();
+  _dlclvsTop = std::vector<DLCLV>();
 }
 
 /**
@@ -128,7 +151,29 @@ template <class REAL> void UndatedDLMultiModel<REAL>::updateCLV(CID cid) {
       REAL p = REAL();
       ok = computeProbability(cid, speciesNode, c, p);
       assert(ok);
-      uq[ec] = p;
+      uq[ec] = p; // raw P_e(gamma)
+      // --- clade CLV seen by the parent (post-WGD transform) ---
+      auto &uqTop = _dlclvsTop[cid];
+      if (_hasWGD[e]) {
+        // WHALE DLWGD form: the duplicate is retained w.p. q, not retained
+        // w.p. 1-q. q=0 recovers the no-WGD model.
+        //   P_top = (1-q) P + q [ 2 E P + split ]
+        double q = _q[e];
+        REAL pe = p;
+        REAL split = REAL();
+        for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+          REAL t = _dlclvs[cs.left][ec] * _dlclvs[cs.right][ec] * cs.frequency;
+          scale(t);
+          split += t;
+        }
+        REAL keep = pe * (1.0 - q);                  // (1-q) P
+        REAL dup = (_uE[ec] * pe * 2.0 + split) * q; // q [2 E P + split]
+        scale(keep);
+        scale(dup);
+        uqTop[ec] = keep + dup;
+      } else {
+        uqTop[ec] = p;
+      }
     }
   }
 }
@@ -202,8 +247,9 @@ void UndatedDLMultiModel<REAL>::recomputeSpeciesProbabilities() {
       _OP[e] = 1.0 / sum;
     }
   }
-  // recompute _uE
+  // recompute _uE (and _uEtop, the post-WGD extinction seen by the parent)
   std::fill(_uE.begin(), _uE.end(), REAL());
+  std::fill(_uEtop.begin(), _uEtop.end(), REAL());
   // iterate several times to resolve _uE probas with
   // fixed point optimization
   unsigned int maxIt = 4;
@@ -226,19 +272,35 @@ void UndatedDLMultiModel<REAL>::recomputeSpeciesProbabilities() {
           auto g = this->getSpeciesRight(speciesNode)->node_index;
           auto fc = f * _gammaCatNumber + c;
           auto gc = g * _gammaCatNumber + c;
-          temp = _uE[fc] * _uE[gc] * _PS[ec]; // SEE scenario
+          // read children's POST-WGD extinction (_uEtop)
+          temp = _uEtop[fc] * _uEtop[gc] * _PS[ec]; // SEE scenario
         } else {
           // terminal branch
           temp = REAL(_PS[ec] * this->_fm[e]); // S but not observed scenario
         }
         scale(temp);
         proba += temp;
-        // DEE scenario
+        // DEE scenario (own branch, below WGD -> raw _uE)
         temp = _uE[ec] * _uE[ec] * _PD[ec];
         scale(temp);
         proba += temp;
         assert(proba < REAL(1.000001));
         _uE[ec] = proba;
+        // --- post-WGD extinction seen by the parent ---
+        // WHALE DLWGD form: the duplicate is retained w.p. q, not retained
+        // w.p. 1-q (asymmetric 1-or-2). q=0 recovers the no-WGD model.
+        //   E_top = (1-q) E + q E^2
+        if (_hasWGD[e]) {
+          double q = _q[e];
+          REAL e1 = _uE[ec];           // E
+          REAL term1 = e1 * (1.0 - q);  // (1-q) E
+          REAL term2 = e1 * e1 * q;     // q E^2
+          scale(term1);
+          scale(term2);
+          _uEtop[ec] = term1 + term2;
+        } else {
+          _uEtop[ec] = _uE[ec];
+        }
       }
     }
   } // end of iteration
@@ -329,7 +391,7 @@ bool UndatedDLMultiModel<REAL>::computeProbability(
     auto freq = cladeSplit.frequency;
     // - S event on an internal species branch
     if (!isSpeciesLeaf) {
-      temp = _dlclvs[cidLeft][fc] * _dlclvs[cidRight][gc] * (_PS[ec] * freq);
+      temp = _dlclvsTop[cidLeft][fc] * _dlclvsTop[cidRight][gc] * (_PS[ec] * freq);
       scale(temp);
       proba += temp;
       if (recCell && proba > maxProba) {
@@ -340,7 +402,7 @@ bool UndatedDLMultiModel<REAL>::computeProbability(
         recCell->blRight = cladeSplit.blRight;
         return true;
       }
-      temp = _dlclvs[cidRight][fc] * _dlclvs[cidLeft][gc] * (_PS[ec] * freq);
+      temp = _dlclvsTop[cidRight][fc] * _dlclvsTop[cidLeft][gc] * (_PS[ec] * freq);
       scale(temp);
       proba += temp;
       if (recCell && proba > maxProba) {
@@ -369,7 +431,7 @@ bool UndatedDLMultiModel<REAL>::computeProbability(
   // for any of gene nodes:
   // - SL event (only on an internal species branch)
   if (!isSpeciesLeaf) {
-    temp = _dlclvs[cid][fc] * (_uE[gc] * _PS[ec]);
+    temp = _dlclvsTop[cid][fc] * (_uEtop[gc] * _PS[ec]);
     scale(temp);
     proba += temp;
     if (recCell && proba > maxProba) {
@@ -379,7 +441,7 @@ bool UndatedDLMultiModel<REAL>::computeProbability(
       recCell->event.pllLostSpeciesNode = this->getSpeciesRight(speciesNode);
       return true;
     }
-    temp = _dlclvs[cid][gc] * (_uE[fc] * _PS[ec]);
+    temp = _dlclvsTop[cid][gc] * (_uEtop[fc] * _PS[ec]);
     scale(temp);
     proba += temp;
     if (recCell && proba > maxProba) {

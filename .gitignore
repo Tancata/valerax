@@ -30,3 +30,15 @@
 *.exe
 *.out
 *.app
+
+# Build directory (CMake out-of-source build)
+/build/
+
+# Test runner outputs
+/tests/outputs/
+
+# Serialized CCP files (e.g. produced by the regression test)
+*.ccp
+
+# Generated, machine-specific (absolute paths); regenerate with make_inputs.py
+/validation/example-1/families.txt

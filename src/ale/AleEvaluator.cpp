@@ -209,6 +209,19 @@ void AleEvaluator::setFamilyParameters(unsigned int family,
   _evaluations[family]->setRates(rateVector);
 }
 
+void AleEvaluator::setWGD(unsigned int speciesNode, double q) {
+  auto it = std::find(_wgdNodes.begin(), _wgdNodes.end(), speciesNode);
+  if (it == _wgdNodes.end()) {
+    _wgdNodes.push_back(speciesNode);
+    _wgdQ.push_back(q);
+  } else {
+    _wgdQ[std::distance(_wgdNodes.begin(), it)] = q;
+  }
+  for (auto &evaluation : _evaluations) {
+    evaluation->setWGD(speciesNode, q);
+  }
+}
+
 /**
  *  Optimizes a set of DTL parameters that are shared among gene families
  */
@@ -262,6 +275,43 @@ public:
 private:
   AleEvaluator &_evaluator;
   unsigned int _family;
+};
+
+/**
+ *  Fast-path optimizer for WGD retention probabilities only (one free value
+ *  per declared WGD branch), reusing DTLOptimizer::optimizeParameters.
+ *
+ *  The L-BFGS-B wrapper only guarantees positivity of the free parameters
+ *  (r >= 0), but a retention probability must live in [0, 1]. We therefore
+ *  optimize an unconstrained r >= 0 and map it through q = r / (1 + r), which
+ *  is a smooth bijection from [0, inf) to [0, 1). r = 0 gives q = 0, i.e. the
+ *  no-WGD null hypothesis.
+ */
+class WGDRetentionOptimizer : public FunctionToOptimize {
+public:
+  WGDRetentionOptimizer(AleEvaluator &evaluator,
+                        const std::vector<unsigned int> &wgdNodes)
+      : _evaluator(evaluator), _nodes(wgdNodes) {}
+
+  void setParameters(Parameters &parameters) {
+    parameters.ensurePositivity(); // optimizer guarantees r >= 0
+    for (unsigned int j = 0; j < _nodes.size(); ++j) {
+      double r = parameters[j];
+      double q = r / (1.0 + r); // map r in [0, inf) -> q in [0, 1)
+      _evaluator.setWGD(_nodes[j], q);
+    }
+  }
+
+  virtual double evaluate(Parameters &parameters) {
+    setParameters(parameters);
+    auto res = _evaluator.computeLikelihood();
+    parameters.setScore(res);
+    return res;
+  }
+
+private:
+  AleEvaluator &_evaluator;
+  std::vector<unsigned int> _nodes;
 };
 
 double AleEvaluator::optimizeModelRates(bool thorough) {
@@ -321,6 +371,48 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
     Logger::timed << "[Species search]   After model rate opt, ll=" << ll
                   << std::endl;
     //            << ", rates=" << _modelParameters << std::endl;
+  }
+  // Fast-path WGD retention optimization: a separate pass after the DTL-rate
+  // optimization, one free retention per declared WGD branch. Guarded only by
+  // whether any WGD is declared (independent of _optimizeRates, so q can be
+  // estimated even with D/L fixed, as the WHALE cross-validation needs).
+  if (!_wgdNodes.empty()) {
+    Logger::timed << "[Species search] Optimizing WGD retention(s) on "
+                  << _wgdNodes.size() << " branch(es), ll=" << ll << std::endl;
+    OptimizationSettings settings;
+    settings.listeners.push_back(&_optimizer);
+    settings.verbose = _optimizeVerbose;
+    settings.strategy = _info.recOpt;
+    settings.lineSearchMinImprovement = std::max(0.1, -ll / 10000.0);
+    settings.optimizationMinImprovement = settings.lineSearchMinImprovement;
+    settings.factr = LBFGSBPrecision::MEDIUM;
+    if (thorough) {
+      settings.minAlpha = 0.005;
+      settings.startingAlpha = 0.01;
+    } else {
+      settings.minAlpha = 0.01;
+      settings.startingAlpha = 0.5;
+    }
+    // Warm-start vector: one r per WGD branch from its current q (r=q/(1-q)).
+    std::vector<double> startR(_wgdNodes.size());
+    for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+      double q = std::min(std::max(_wgdQ[j], 0.0), 0.999999);
+      startR[j] = q / (1.0 - q);
+    }
+    Parameters startingParameters(startR);
+    WGDRetentionOptimizer function(*this, _wgdNodes);
+    ParallelContext::barrier();
+    auto bestParameters = DTLOptimizer::optimizeParameters(
+        function, startingParameters, settings);
+    function.setParameters(bestParameters); // applies q-hat to all evaluations
+    ll = computeLikelihood();
+    Logger::timed << "[Species search]   After WGD retention opt, ll=" << ll;
+    for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+      double r = bestParameters[j];
+      double q = r / (1.0 + r);
+      Logger::info << " q[node " << _wgdNodes[j] << "]=" << q;
+    }
+    Logger::info << std::endl;
   }
   ll = optimizeGammaRates();
   resetAllPrecisions();

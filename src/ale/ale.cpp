@@ -490,6 +490,63 @@ void runReconciliationInference(const AleArguments &args,
 }
 
 /**
+ *  Resolve every --wgd declaration to a species-tree node index and broadcast
+ *  it to the evaluator. A single label selects that terminal branch; two labels
+ *  select the branch leading to their LCA.
+ *
+ *  NOTE: node indices are tied to the current species tree topology, so a WGD
+ *  declared here is only meaningful while the topology is fixed. --wgd is
+ *  therefore intended for use with --species-tree-search SKIP.
+ */
+void declareWGDs(const AleArguments &args, AleOptimizer &optimizer) {
+  if (args.wgds.empty()) {
+    return;
+  }
+  if (args.speciesSearchStrategy != SpeciesSearchStrategy::SKIP &&
+      args.speciesSearchStrategy != SpeciesSearchStrategy::EVAL) {
+    Logger::info << "Warning: --wgd is being used together with a species tree "
+                 << "search; the WGD branch is resolved on the starting tree "
+                 << "and may no longer be correct if the topology changes. "
+                 << "Use --species-tree-search SKIP for WGD analyses."
+                 << std::endl;
+  }
+  auto &speciesTree = optimizer.getSpeciesTree().getTree();
+  auto labelToNode = speciesTree.getLabelToNode(false);
+  auto &evaluator = optimizer.getEvaluator();
+  for (const auto &wgd : args.wgds) {
+    corax_rnode_t *node = nullptr;
+    if (wgd.labels.size() == 1) {
+      auto it = labelToNode.find(wgd.labels[0]);
+      if (it == labelToNode.end()) {
+        Logger::error << "Error: --wgd label '" << wgd.labels[0]
+                      << "' was not found in the species tree" << std::endl;
+        ParallelContext::abort(1);
+      }
+      node = it->second;
+    } else if (wgd.labels.size() == 2) {
+      auto it1 = labelToNode.find(wgd.labels[0]);
+      auto it2 = labelToNode.find(wgd.labels[1]);
+      if (it1 == labelToNode.end() || it2 == labelToNode.end()) {
+        Logger::error << "Error: --wgd labels '" << wgd.labels[0] << "' and '"
+                      << wgd.labels[1]
+                      << "' were not both found in the species tree"
+                      << std::endl;
+        ParallelContext::abort(1);
+      }
+      node = speciesTree.getLCA(it1->second, it2->second);
+    } else {
+      Logger::error << "Error: --wgd expects 1 or 2 taxon labels" << std::endl;
+      ParallelContext::abort(1);
+    }
+    evaluator.setWGD(node->node_index, wgd.q0);
+    Logger::timed << "Declared a WGD at the top of the branch leading to node "
+                  << node->node_index << " (label: "
+                  << (node->label ? node->label : "<internal>")
+                  << "), starting retention q=" << wgd.q0 << std::endl;
+  }
+}
+
+/**
  *  Main function of AleRax once the arguments have been parsed
  *
  *  @param args The program arguments
@@ -536,6 +593,8 @@ void run(AleArguments &args) {
       args.speciesTree, families, info, args.modelParametrization,
       args.optimizationClassFile, startingRates, !args.fixRates,
       args.optVerbose, args.output);
+  // declare any command-line WGDs on the (now constructed) species tree
+  declareWGDs(args, speciesTreeOptimizer);
   if (!checkpointDetected) {
     initCheckpoint(args, families, ckpDir);
     speciesTreeOptimizer.setCurrentStep(AleStep::SpeciesTreeOpt);

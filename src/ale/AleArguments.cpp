@@ -12,6 +12,37 @@ const unsigned int DEFAULT_MIN_COVERED_SPECIES = 4;
 const double DEFAULT_TRIM_FAMILY_RATIO = 0.0;
 const double DEFAULT_MAX_SPLIT_RATIO = -1.0;
 const double DEFAULT_DTL_RATES = 0.1;
+const double DEFAULT_WGD_Q0 = 0.2;
+
+// Parse a --wgd argument of the form LABEL[,LABEL2][:q0].
+// One label selects a terminal branch; two labels select their LCA branch.
+// The optional :q0 sets the starting retention probability (default 0.2).
+static WGDDeclaration parseWGDDeclaration(const std::string &spec) {
+  WGDDeclaration wgd;
+  wgd.q0 = DEFAULT_WGD_Q0;
+  std::string labelsPart = spec;
+  auto colon = spec.find(':');
+  if (colon != std::string::npos) {
+    labelsPart = spec.substr(0, colon);
+    std::string qStr = spec.substr(colon + 1);
+    if (!qStr.empty()) {
+      wgd.q0 = atof(qStr.c_str());
+    }
+  }
+  size_t start = 0;
+  while (start <= labelsPart.size()) {
+    auto comma = labelsPart.find(',', start);
+    auto end = (comma == std::string::npos) ? labelsPart.size() : comma;
+    if (end > start) {
+      wgd.labels.push_back(labelsPart.substr(start, end - start));
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    start = comma + 1;
+  }
+  return wgd;
+}
 
 AleArguments::AleArguments(int iargc, char **iargv)
     : argc(iargc), argv(iargv), reconciliationModelStr("UndatedDTL"),
@@ -75,6 +106,8 @@ AleArguments::AleArguments(int iargc, char **iargv)
       noTL = true;
     } else if (arg == "--memory-savings") {
       memorySavings = true;
+    } else if (arg == "--wgd") {
+      wgds.push_back(parseWGDDeclaration(std::string(argv[++i])));
     } else if (arg == "--d") {
       d = atof(argv[++i]);
     } else if (arg == "--l") {
@@ -396,6 +429,9 @@ void AleArguments::printHelp() const {
   Logger::info << "\t--no-dl" << std::endl;
   Logger::info << "\t--no-tl" << std::endl;
   Logger::info << "\t--memory-savings" << std::endl;
+  Logger::info << "\t--wgd <LABEL[,LABEL2][:q0]> (declare a WGD on a terminal "
+               << "branch or the branch to the LCA of two taxa; repeatable)"
+               << std::endl;
 
   Logger::info << "Search strategy options:" << std::endl;
   Logger::info << "\t--species-tree-search {HYBRID, REROOT, SKIP}" << std::endl;
