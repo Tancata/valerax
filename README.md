@@ -1,5 +1,27 @@
 
 
+# Valerax — a WGD-focused fork of AleRax
+
+> **This is a fork of [AleRax](https://github.com/BenoitMorel/AleRax).** It adds
+> support for modelling **whole-genome duplications (WGD)** in AleRax's undated
+> reconciliation models: a WGD can be declared on any species branch with a
+> per-branch retention parameter `q`, which is then estimated by maximum
+> likelihood — letting you test WGD hypotheses the way
+> [WHALE](https://github.com/arzwa/Whale.jl) does, but on AleRax's amalgamated
+> DL and DTL likelihoods.
+>
+> 📄 **Start here: [`WGD_REPORT.md`](WGD_REPORT.md)** — a short, readable report
+> covering the implementation, a benchmark against WHALE, and what allowing
+> horizontal transfers (DL vs DTL) does to the evidence for WGD.
+>
+> The WGD code lives mainly in `src/ale/UndatedDLMultiModel.hpp` and
+> `src/ale/UndatedDTLMultiModel.hpp`, exposed via the `--wgd` command-line
+> option; cross-validation inputs and recipes are under `validation/`. This is a
+> research prototype — see the report's *Limitations*. Everything below is the
+> upstream AleRax documentation.
+
+---
+
 # AleRax  
 
 AleRax is a parallel tool for species tree - gene tree inference and reconciliation under gene duplication, loss, and HGT. For each gene family, it takes as input a gene tree distribution (typically inferred with Bayesian inference tools such as MrBayes, PhyloBayes, etc.). AleRax can perform the following operations:
