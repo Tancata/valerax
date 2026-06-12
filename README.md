@@ -19,6 +19,17 @@
 > option; cross-validation inputs and recipes are under `validation/`. This is a
 > research prototype — see the report's *Limitations*. Everything below is the
 > upstream AleRax documentation.
+>
+> **Inspiration & acknowledgement.** The WGD retention model and the validation
+> approach are directly inspired by **WHALE**
+> ([arzwa/Whale.jl](https://github.com/arzwa/Whale.jl)), which implements a
+> duplication–loss–WGD (DLWGD) model on the same amalgamated-likelihood
+> framework. If you use the WGD features here, please also cite the WHALE paper:
+>
+> > Zwaenepoel, A. and Van de Peer, Y., 2019. *Inference of Ancient Whole-Genome
+> > Duplications and the Evolution of Gene Duplication and Loss Rates.*
+> > Molecular Biology and Evolution, 36(7), pp. 1384–1404.
+> > [doi:10.1093/molbev/msz088](https://doi.org/10.1093/molbev/msz088)
 
 ---
 
