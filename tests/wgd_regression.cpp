@@ -144,5 +144,66 @@ int main(int argc, char **argv) {
   }
   std::printf("PASS: likelihood converges monotonically to the no-WGD value as "
               "q->0.\n");
+
+  // ---- LORe (delayed rediploidization) checks (WGD_LORE.md) ----
+  // STEP 5 HARD GATE: at r = 1 (default), the LORe build must reproduce the
+  // Patch-4 WHALE log-likelihood. References captured from the pre-LORe binary
+  // for a WGD on this branch (simulated_2, family 0_pruned).
+  struct QRef {
+    double q, ll;
+  };
+  const QRef whaleRef[] = {
+      {0.5, -59.140189160263},
+      {0.1, -58.767016303227},
+      {0.01, -58.697442712799},
+      {1e-4, -58.690055767353},
+  };
+  const double GATE_TOL = 1e-9;
+  model.setResolutionProb(1.0);
+  std::printf("LORe r=1 gate (must reproduce WHALE):\n");
+  for (const auto &ref : whaleRef) {
+    model.setWGD(wgdNode->node_index, ref.q);
+    double llq = model.computeLogLikelihood();
+    double d = std::fabs(llq - ref.ll);
+    std::printf("  q=%.4g r=1 -> ll=%.12f  (WHALE %.12f, |diff|=%.2e)\n", ref.q,
+                llq, ref.ll, d);
+    if (d > GATE_TOL) {
+      std::fprintf(stderr,
+                   "FAIL: LORe r=1 does NOT reproduce WHALE at q=%.4g "
+                   "(|diff|=%.3e > %.3e)\n",
+                   ref.q, d, GATE_TOL);
+      return 1;
+    }
+  }
+  std::printf("PASS: LORe r=1 reproduces the WHALE log-likelihood (hard gate).\n");
+
+  // Sanity: with a WGD (q=0.5) fixed, varying the resolution probability r must
+  // change the likelihood (the LORe machinery is live) and stay finite.
+  model.setWGD(wgdNode->node_index, 0.5);
+  const double rs[] = {1.0, 0.5, 0.1, 1e-3};
+  double prevLLr = 0.0;
+  bool movedWithR = false;
+  std::printf("LORe r-sweep at q=0.5 on branch %u:\n", wgdNode->node_index);
+  for (unsigned int i = 0; i < sizeof(rs) / sizeof(rs[0]); ++i) {
+    model.setResolutionProb(rs[i]);
+    double llr = model.computeLogLikelihood();
+    std::printf("  r=%.4g -> ll=%.12f\n", rs[i], llr);
+    if (!std::isfinite(llr)) {
+      std::fprintf(stderr, "FAIL: LORe likelihood not finite at r=%.4g\n", rs[i]);
+      return 1;
+    }
+    if (i > 0 && std::fabs(llr - prevLLr) > 1e-9) {
+      movedWithR = true;
+    }
+    prevLLr = llr;
+  }
+  if (!movedWithR) {
+    std::fprintf(stderr,
+                 "FAIL: likelihood does not respond to r (LORe machinery dead)\n");
+    return 1;
+  }
+  std::printf("PASS: LORe machinery is live (likelihood responds to r).\n");
+
+  model.setResolutionProb(1.0); // restore default
   return 0;
 }

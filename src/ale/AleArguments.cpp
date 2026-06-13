@@ -45,7 +45,8 @@ static WGDDeclaration parseWGDDeclaration(const std::string &spec) {
 }
 
 AleArguments::AleArguments(int iargc, char **iargv)
-    : argc(iargc), argv(iargv), reconciliationModelStr("UndatedDTL"),
+    : argc(iargc), argv(iargv), lore(false),
+      reconciliationModelStr("UndatedDTL"),
       transferConstraint(TransferConstaint::PARENTS), noDup(false), noDL(false),
       noTL(false), pruneSpeciesTree(false), ccpRooting(CCPRooting::UNIFORM),
       originationStrategy(OriginationStrategy::UNIFORM), memorySavings(false),
@@ -108,6 +109,8 @@ AleArguments::AleArguments(int iargc, char **iargv)
       memorySavings = true;
     } else if (arg == "--wgd") {
       wgds.push_back(parseWGDDeclaration(std::string(argv[++i])));
+    } else if (arg == "--lore") {
+      lore = true;
     } else if (arg == "--d") {
       d = atof(argv[++i]);
     } else if (arg == "--l") {
@@ -432,6 +435,9 @@ void AleArguments::printHelp() const {
   Logger::info << "\t--wgd <LABEL[,LABEL2][:q0]> (declare a WGD on a terminal "
                << "branch or the branch to the LCA of two taxa; repeatable)"
                << std::endl;
+  Logger::info << "\t--lore (estimate delayed rediploidization: fit a global "
+               << "resolution prob r; requires --wgd and --rec-model UndatedDL)"
+               << std::endl;
 
   Logger::info << "Search strategy options:" << std::endl;
   Logger::info << "\t--species-tree-search {HYBRID, REROOT, SKIP}" << std::endl;
@@ -521,6 +527,18 @@ void AleArguments::checkValid() const {
     ok = false;
     Logger::info << "\nError: --no-dup cannot be used "
                  << "with --no-tl" << std::endl;
+  }
+  // LORe block
+  if (lore) {
+    if (wgds.empty()) {
+      ok = false;
+      Logger::info << "\nError: --lore requires at least one --wgd" << std::endl;
+    }
+    if (reconciliationModelStr != "UndatedDL") {
+      ok = false;
+      Logger::info << "\nError: --lore is only implemented for "
+                   << "--rec-model UndatedDL (phase 1)" << std::endl;
+    }
   }
   if (d <= 0.0 || l <= 0.0 || t <= 0.0) {
     ok = false;

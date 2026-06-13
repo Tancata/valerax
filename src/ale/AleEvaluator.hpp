@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <iterator>
 #include <memory>
 
 #include <IO/Families.hpp>
@@ -119,6 +121,35 @@ public:
   const std::vector<unsigned int> &getWGDNodes() const { return _wgdNodes; }
 
   /**
+   *  The current (fitted) retention probability q of the WGD on species branch
+   *  `speciesNode` (1.0 if no WGD is declared there).
+   */
+  double getWGDRetention(unsigned int speciesNode) const {
+    auto it = std::find(_wgdNodes.begin(), _wgdNodes.end(), speciesNode);
+    return (it == _wgdNodes.end())
+               ? 1.0
+               : _wgdQ[std::distance(_wgdNodes.begin(), it)];
+  }
+
+  /**
+   *  The current (fitted) global LORe resolution probability r (1.0 == AORe).
+   */
+  double getResolutionProb() const { return _resolutionProb; }
+
+  /**
+   *  Set the (global, phase-1) LORe resolution probability r in [0,1] and
+   *  broadcast it to every local family evaluation. r=1 == WHALE/AORe.
+   */
+  void setResolutionProb(double r);
+
+  /**
+   *  Enable/disable optimisation of the LORe resolution probability r. When
+   *  enabled, r is fitted jointly with the WGD retentions in the fast-path pass.
+   */
+  void enableResolutionOptimization(bool on) { _optimizeResolution = on; }
+  bool optimizesResolution() const { return _optimizeResolution; }
+
+  /**
    *  Optimize the model rates
    */
   virtual double optimizeModelRates(bool thorough);
@@ -135,6 +166,14 @@ public:
    */
   void sampleFamilyScenarios(unsigned int i, unsigned int samples,
                              std::vector<std::shared_ptr<Scenario>> &scenarios);
+
+  /**
+   *  Sample `samples` LORe resolution histories for family i and accumulate,
+   *  per species branch, the number of U->R commit (WGD resolution) events.
+   *  Empty for models / families without a WGD. CLVs are (re)computed first.
+   */
+  void sampleFamilyResolutionCommits(unsigned int i, unsigned int samples,
+                                     std::vector<double> &commitCounts);
 
   /**
    *  Sample reconciliations and return the HGT frequencies and
@@ -225,6 +264,10 @@ private:
   // start for the retention optimizer)
   std::vector<unsigned int> _wgdNodes;
   std::vector<double> _wgdQ;
+  // LORe (delayed rediploidization): global resolution probability r and
+  // whether it is optimised jointly with the WGD retentions
+  double _resolutionProb = 1.0;
+  bool _optimizeResolution = false;
   std::vector<int> _highPrecisions;
   // LL buffer for global families
   std::vector<double> _snapshotPerFamilyLL;

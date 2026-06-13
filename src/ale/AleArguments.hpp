@@ -71,6 +71,8 @@ public:
 
   // whole-genome duplications declared via --wgd
   std::vector<WGDDeclaration> wgds;
+  // LORe: estimate a (global) delayed-rediploidization resolution prob r
+  bool lore;
 
   // model
   std::string reconciliationModelStr;

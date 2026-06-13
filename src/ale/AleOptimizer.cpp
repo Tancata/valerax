@@ -436,6 +436,16 @@ void AleOptimizer::reconcile(unsigned int samples) {
     perHighwayPerFamTransfers =
         MatrixDouble(highways.size(), VectorDouble(localFamilies.size(), 0.0));
   }
+  // LORe: per-species WGD resolution-event (U->R commit) profile, accumulated
+  // over families. Only for the DL model with a declared WGD, full (unpruned)
+  // species tree, and CLVs kept in RAM (no memory savings). See
+  // WGD_LORE_marginal.md STEP 4.
+  const auto &recInfo = _evaluator->getRecModelInfo();
+  bool doResolution = !_evaluator->getWGDNodes().empty() &&
+                      recInfo.model == RecModel::UndatedDL &&
+                      !recInfo.pruneSpeciesTree && !recInfo.memorySavings;
+  std::vector<double> totalResolution(getSpeciesTree().getTree().getNodeNumber(),
+                                      0.0);
   for (unsigned int i = 0; i < localFamilies.size(); ++i) {
     std::vector<std::string> perSpeciesEventCountsFiles;
     std::vector<std::string> transferFiles;
@@ -448,6 +458,26 @@ void AleOptimizer::reconcile(unsigned int samples) {
     _evaluator->sampleFamilyScenarios(i, samples, scenarios);
     allScenarios.insert(allScenarios.end(), scenarios.begin(), scenarios.end());
     assert(scenarios.size() == samples);
+    // LORe: sample the per-branch WGD resolution-event (U->R commit) profile for
+    // this family under the fitted r, and write the per-family expected counts.
+    if (doResolution) {
+      std::vector<double> famCommits;
+      _evaluator->sampleFamilyResolutionCommits(i, samples, famCommits);
+      auto famResFile = FileSystem::joinPaths(
+          summariesDir, localFamilies[i].name + "_meanResolutionCounts.txt");
+      ParallelOfstream famOs(famResFile, false);
+      famOs << "#species_branch\texpected_WGD_resolution_events" << std::endl;
+      for (auto node : getSpeciesTree().getTree().getNodes()) {
+        double expected =
+            famCommits.empty()
+                ? 0.0
+                : famCommits[node->node_index] / static_cast<double>(samples);
+        totalResolution[node->node_index] += expected;
+        famOs << (node->label ? node->label : "NA") << "\t" << expected
+              << std::endl;
+      }
+      famOs.close();
+    }
     // writing in the reconciliations/all/ dir
     auto geneTreesPath = FileSystem::joinPaths(
         allRecDir, localFamilies[i].name + "_samples.newick");
@@ -522,6 +552,49 @@ void AleOptimizer::reconcile(unsigned int samples) {
   auto totalTransferFile = FileSystem::joinPaths(recDir, "totalTransfers.txt");
   Scenario::mergeTransfers(getSpeciesTree().getTree(), totalTransferFile,
                            summaryTransferFiles, true, false);
+  // export the total per-branch WGD resolution-event (U->R commit) profile:
+  // the expected number of ohnolog-divergence (rediploidization) commits on
+  // each species branch, summed over all gene families, under the fitted r.
+  if (doResolution) {
+    ParallelContext::sumVectorDouble(totalResolution);
+    auto totalResolutionFile =
+        FileSystem::joinPaths(recDir, "totalSpeciesResolutionCounts.txt");
+    ParallelOfstream os(totalResolutionFile, true); // master rank only
+    os << "#species_branch\texpected_WGD_resolution_events" << std::endl;
+    for (auto node : getSpeciesTree().getTree().getNodes()) {
+      os << (node->label ? node->label : "NA") << "\t"
+         << totalResolution[node->node_index] << std::endl;
+    }
+    os.close();
+    Logger::timed << "[Reconciliation] WGD resolution-branch profile: "
+                  << totalResolutionFile << std::endl;
+    // Per-WGD summary: declared branch, fitted retention q and resolution r, and
+    // the expected number of rediploidization commits within the WGD's subtree.
+    // This makes the WGD location self-contained even under LORe (where the
+    // resolution profile above points at descendant branches, not the WGD one).
+    auto &stree = getSpeciesTree().getTree();
+    double rHat = _evaluator->getResolutionProb();
+    auto wgdSummaryFile = FileSystem::joinPaths(recDir, "wgdSummary.txt");
+    ParallelOfstream wos(wgdSummaryFile, true);
+    wos << "#wgd_branch\tnode_index\tq_retention\tr_resolution"
+        << "\texpected_resolution_commits" << std::endl;
+    for (auto w : _evaluator->getWGDNodes()) {
+      double subtreeCommits = 0.0;
+      for (auto node : stree.getNodes()) {
+        auto e = node->node_index;
+        if (e == w || stree.isAncestorOf(w, e)) {
+          subtreeCommits += totalResolution[e];
+        }
+      }
+      auto *wnode = stree.getNode(w);
+      wos << (wnode->label ? wnode->label : "NA") << "\t" << w << "\t"
+          << _evaluator->getWGDRetention(w) << "\t" << rHat << "\t"
+          << subtreeCommits << std::endl;
+    }
+    wos.close();
+    Logger::timed << "[Reconciliation] WGD summary (branch, q, r, commits): "
+                  << wgdSummaryFile << std::endl;
+  }
   // export highway information
   for (unsigned int hi = 0; hi < highways.size(); ++hi) {
     saveFamiliesTakingHighway(highways[hi], perHighwayPerFamTransfers[hi],

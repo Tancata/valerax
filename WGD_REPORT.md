@@ -158,7 +158,91 @@ finding is robust to the transfer constraint (`NONE` gives essentially the same
 
 ---
 
-## 4. Limitations
+## 4. Delayed rediploidization (LORe)
+
+The WGD model above assumes the two ohnolog copies diverge **immediately** at the
+WGD — *autopolyploid-like, ancestral rediploidization* (**AORe**). But after many
+real WGDs the doubled genome stays tetrasomic for a while and the ohnologs
+**rediploidize later, independently in different descendant lineages**
+(*lineage-specific ordered rediploidization*, **LORe**; e.g. the salmonid Ss4R).
+This fork adds an (opt-in, DL-only) LORe model.
+
+### The model
+A gene lineage carries a hidden state: **R** (resolved/disomic, ordinary) or
+**U** (unresolved/tetrasomic — a single lineage holding a not-yet-diverged
+ohnolog pair). At the WGD branch the retained duplicate enters the **U** state
+(with probability `q`). A U lineage passes through speciation **as a unit** (both
+daughters inherit U) and, on each branch, **resolves with probability `r`** — and
+*resolution is the ohnolog divergence*, placed on the branch where it happens. So:
+
+- `q = 0` → no WGD (the null);
+- `r = 1` → resolution is certain at the WGD branch → recovers AORe / WHALE exactly;
+- `r < 1` → resolution can be delayed to descendant lineages → LORe.
+
+Concretely, the resolved extinction `E` and clade likelihood `R` gain unresolved
+counterparts `EU`, `U`, with `EU = r·E² + (1−r)(…)` and
+`U = r·dupBracket + (1−r)(speciate-U + speciate-loss-U)`, and the WGD branch mixes
+them: `transform = (1−q)·R + q·U` (and likewise for extinction). At `r = 1` this is
+**bit-for-bit** the AORe transform (a hard regression gate).
+
+`r` is a **single global parameter, pooled across all families** (not per-family,
+not free per-branch), fitted jointly with `q` by maximum likelihood. Because the
+LORe model *nests* AORe (`r = 1`), the fit is guarded to never score below the
+AORe optimum: with no delayed-resolution signal, `r̂ → 1` and the LRT ties.
+
+### Reading out *where* rediploidization happened
+The resolution **branch** is not a parameter — it is a **posterior marginal**
+read out (under the fitted global `r`) by a *U-aware backtrace*: the
+reconciliation sampler is extended with the U state and a U→R **commit** event
+that records the species branch where each ohnolog pair diverged. Every sampling
+weight equals the exact inside-likelihood term (an always-on consistency guard
+asserts this), so the commit frequencies are unbiased.
+
+This is written to the reconciliation output:
+
+- `reconciliations/totalSpeciesResolutionCounts.txt` — the **genome-wide
+  rediploidization-timing profile**: expected number of ohnolog-divergence
+  commits on each species branch, summed over families.
+- `reconciliations/summaries/<fam>_meanResolutionCounts.txt` — per family.
+- `reconciliations/wgdSummary.txt` — per declared WGD: branch, fitted `q`,
+  fitted `r`, and the expected commits in its subtree (so the WGD location, its
+  retention, and its AORe/LORe status are self-contained in one file).
+
+Under **AORe** the commits sit on the WGD branch itself; under **LORe** they sit
+on the descendant lineage branches (and the WGD branch reads ≈ 0). So the WGD
+*doubling* branch is always the user-declared one (in `wgdSummary.txt`), while the
+*resolution* profile shows the timing.
+
+### Validation
+On a controlled toy (WGD on the LCA branch, D/L fixed):
+
+| gene tree | fitted `r̂` | resolution commits land on |
+|---|---|---|
+| species-grouped `((Aa,Ab),(Ba,Bb))` (true LORe) | **0.62** | the two lineage/terminal branches (≈0.95 each), WGD branch ≈0 |
+| ohnolog-grouped `((Aa,Ba),(Ab,Bb))` (true AORe) | **1.0** | the WGD branch (≈1), terminals 0 |
+
+So the highest-posterior commit branch matches the simulated truth in both cases,
+under the fitted global `r`, with no per-branch tuning. On `example-1` (no LORe
+signal) `r̂ → 1` and the model ties AORe.
+
+> **Use it:** add `--lore` to a `--wgd` run (DL model). Without `--lore`, `r = 1`
+> (AORe); the resolution profile is still written and attributes the WGD-derived
+> duplications to the WGD branch.
+
+### LORe-specific caveats
+- **Identifiability lives in gene-tree topology** (species-grouped vs
+  ohnolog-grouped ohnologs). If the CCPs don't carry multi-species ohnolog
+  structure, `r` trades off against loss/retention and `r̂` is not meaningful —
+  check the input actually contains that signal before interpreting it.
+- The resolution branch is a *posterior readout under one global `r`*, not a free
+  per-branch rate; and the timing is a resolution **branch**, not a dated time
+  (the undated model infers *where*, not *when*).
+- Implemented for the DL model only (no transfers), one WGD at a time in the
+  validated toy.
+
+---
+
+## 5. Limitations
 
 - **Tiny dataset.** `example-1` is 12 families; significance values here are
   illustrative, not conclusions about plant evolution.
@@ -174,16 +258,25 @@ finding is robust to the transfer constraint (`NONE` gives essentially the same
 
 ---
 
-## 5. Reproducing
+## 6. Reproducing
 
 ```sh
 # build (no MPI):
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDISABLE_MPI=ON
-cmake --build . --target alerax wgd_regression -j4
+cmake --build . --target alerax wgd_regression lore_marginal -j4
 
-# regression test (no-WGD == stock, and q->0 convergence):
+# WGD regression + LORe r=1 gate (no-WGD == stock, q->0, r=1 == WHALE):
 ./bin/wgd_regression <species_tree> <gene_trees> <mapping>
+
+# LORe resolution-branch marginal (recovers the simulated commit branch):
+./bin/lore_marginal <species_tree> <geneTree> <taxonA> <taxonB> <AORe|LORe>
+
+# run a WGD + LORe analysis (DL model), writing the resolution profile:
+./bin/alerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+  --gene-tree-rooting UNIFORM --species-tree-search SKIP \
+  --wgd ATAXON,BTAXON --lore -p out
+#   -> out/reconciliations/{totalSpeciesResolutionCounts,wgdSummary}.txt
 
 # WHALE benchmark inputs and the exact run recipe:
 #   validation/example-1/README.md

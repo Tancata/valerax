@@ -45,6 +45,18 @@ public:
   // retention probability q. No-op for models that do not implement WGD.
   virtual void setWGD(unsigned int /*speciesNode*/, double /*q*/) {}
 
+  // Set the (global) LORe resolution probability r in [0,1]. r=1 recovers the
+  // immediate-resolution (WHALE/AORe) WGD model. No-op for models without LORe.
+  virtual void setResolutionProb(double /*r*/) {}
+
+  // Sample `samples` resolution histories and accumulate, per species branch,
+  // the number of U->R commit (WGD resolution) events. CLVs must be current.
+  // No-op (empty output) for models without LORe. See WGD_LORE_marginal.md.
+  virtual void sampleResolutionCommits(unsigned int /*samples*/,
+                                       std::vector<double> &commitCounts) {
+    commitCounts.clear();
+  }
+
   virtual double computeLogLikelihood() = 0;
 
   virtual bool inferMLScenario(Scenario &scenario) = 0;

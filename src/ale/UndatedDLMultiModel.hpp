@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib> // std::abort for the always-on LORe consistency guard
+
 #include "MultiModel.hpp"
 
 /**
@@ -27,7 +29,55 @@ public:
     this->resetCache();
   }
 
+  // --- LORe extension ---
+  // Set the resolution probability r in [0,1] on EVERY species branch (the
+  // phase-1 global-r behaviour). r = 1 recovers the WHALE/AORe model.
+  void setResolutionProb(double r) override {
+    std::fill(_resolutionProbs.begin(), _resolutionProbs.end(), r);
+    this->invalidateAllSpeciesNodes();
+    this->resetCache();
+  }
+
+  // Set the resolution probability on a single species branch e (phase 1.5:
+  // branch-specific r, used to place / recover lineage-specific resolution).
+  void setResolutionProbBranch(unsigned int e, double r) {
+    _resolutionProbs[e] = r;
+    this->invalidateAllSpeciesNodes();
+    this->resetCache();
+  }
+  double getResolutionProbBranch(unsigned int e) const {
+    return _resolutionProbs[e];
+  }
+
+  // --- LORe resolution-branch marginal (WGD_LORE_marginal.md, phase 1b) ---
+  // Sample `samples` resolution histories under the CURRENT (fitted) global r
+  // via a U-aware backtrace, and accumulate per species branch the expected
+  // number of U->R commit (resolution / ohnolog-divergence) events. CLVs must
+  // be current: call computeLogLikelihood() first. With `check`, asserts the
+  // STEP 5.2 consistency (sampled-term weights sum to the inside CLV) at every
+  // U cell and at the WGD R-vs-U coin.
+  void sampleResolutionCommits(unsigned int samples,
+                               std::vector<double> &commitCounts, bool check);
+
+  // Interface override (used by the reconciliation pipeline): no consistency
+  // check, current CLVs assumed.
+  void sampleResolutionCommits(unsigned int samples,
+                               std::vector<double> &commitCounts) override {
+    sampleResolutionCommits(samples, commitCounts, false);
+  }
+
 private:
+  // U-aware backtrace helpers for the resolution-branch marginal. They reuse
+  // computeProbability() to sample the resolved (R-state) events, and add the
+  // unresolved (U-state) recursion and the WGD R/U coin on top.
+  corax_rnode_t *sampleOriginationR(unsigned int &category);
+  void btR(CID cid, corax_rnode_t *sp, unsigned int c,
+           std::vector<unsigned int> &commits, bool check);
+  void btU(CID cid, corax_rnode_t *sp, unsigned int c,
+           std::vector<unsigned int> &commits, bool check);
+  void btDescend(CID cid, corax_rnode_t *sp, unsigned int c,
+                 std::vector<unsigned int> &commits, bool check);
+
   unsigned int _gammaCatNumber;
   std::vector<double> _gammaScalers;
   RatesVector _dlRates;
@@ -50,6 +100,27 @@ private:
   std::vector<double> _q;        // per species branch: retention prob (if WGD)
   std::vector<REAL> _uEtop;      // extinction seen by PARENT, per (e,cat)
   std::vector<DLCLV> _dlclvsTop; // clade CLV seen by PARENT, per clade per (e,cat)
+
+  // --- LORe (delayed rediploidization) extension ---
+  std::vector<DLCLV> _uclvs;       // unresolved (tetrasomic) CLV, per clade per (e,cat)
+  std::vector<REAL> _uEU;          // unresolved extinction, per (e,cat)
+  std::vector<double> _resolutionProbs; // per species branch: r in [0,1]; 1==AORe
+
+  // Doubling bracket shared by the WGD and LORe transforms:
+  //   2*E*R + sum_splits ccp * R_left * R_right   (no _PD, no q/r weighting).
+  // Reads R (=_dlclvs) and E (=_uE) at node-cat ec; _dlclvs[cid][ec] must
+  // already hold R for this clade (set just before this is called in updateCLV).
+  REAL dupBracket(unsigned int cid, unsigned int ec) {
+    REAL split = REAL();
+    for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+      REAL t = _dlclvs[cs.left][ec] * _dlclvs[cs.right][ec] * cs.frequency;
+      scale(t);
+      split += t;
+    }
+    REAL out = _uE[ec] * _dlclvs[cid][ec] * 2.0 + split;
+    scale(out);
+    return out;
+  }
 
   // functions to work with CLVs
   virtual void allocateMemory();
@@ -92,7 +163,10 @@ UndatedDLMultiModel<REAL>::UndatedDLMultiModel(
   _hasWGD.assign(N, 0);
   _q.assign(N, 1.0);
   _uEtop.assign(Nc, REAL());
-  // _dlclvsTop is allocated alongside _dlclvs in allocateMemory()
+  // --- LORe extension: unresolved extinction (CLV is in allocateMemory) ---
+  _uEU.assign(Nc, REAL());
+  _resolutionProbs.assign(N, 1.0); // default r=1 everywhere == AORe/WHALE
+  // _dlclvsTop and _uclvs are allocated alongside _dlclvs in allocateMemory()
   // set gamma scalers with the default alpha
   setAlpha(1.0);
   // set all DLO rates to the default value
@@ -126,6 +200,7 @@ template <class REAL> void UndatedDLMultiModel<REAL>::allocateMemory() {
   DLCLV nullCLV(this->getAllSpeciesNodeNumber() * _gammaCatNumber, REAL());
   _dlclvs = std::vector<DLCLV>(this->_ccp.getCladesNumber(), nullCLV);
   _dlclvsTop = std::vector<DLCLV>(this->_ccp.getCladesNumber(), nullCLV);
+  _uclvs = std::vector<DLCLV>(this->_ccp.getCladesNumber(), nullCLV);
 }
 
 /**
@@ -134,6 +209,7 @@ template <class REAL> void UndatedDLMultiModel<REAL>::allocateMemory() {
 template <class REAL> void UndatedDLMultiModel<REAL>::deallocateMemory() {
   _dlclvs = std::vector<DLCLV>();
   _dlclvsTop = std::vector<DLCLV>();
+  _uclvs = std::vector<DLCLV>();
 }
 
 /**
@@ -141,36 +217,70 @@ template <class REAL> void UndatedDLMultiModel<REAL>::deallocateMemory() {
  */
 template <class REAL> void UndatedDLMultiModel<REAL>::updateCLV(CID cid) {
   auto &uq = _dlclvs[cid];
+  auto &uu = _uclvs[cid];
   std::fill(uq.begin(), uq.end(), REAL());
+  std::fill(uu.begin(), uu.end(), REAL());
   bool ok;
   for (unsigned int c = 0; c < _gammaCatNumber; ++c) {
     // postorder species tree traversal is granted
     for (auto speciesNode : this->getPrunedSpeciesNodes()) {
       auto e = speciesNode->node_index;
       auto ec = e * _gammaCatNumber + c;
+      const double r = _resolutionProbs[e]; // per-branch resolution prob
       REAL p = REAL();
       ok = computeProbability(cid, speciesNode, c, p);
       assert(ok);
-      uq[ec] = p; // raw P_e(gamma)
-      // --- clade CLV seen by the parent (post-WGD transform) ---
+      uq[ec] = p; // resolved CLV R
+
+      // --- LORe: unresolved (tetrasomic) CLV U (STEP 4) ---
+      //   U = r * dupBracket(cid,ec)                 // resolve here -> doubling
+      //     + (1-r) * [ speciation, both daughters inherit U (both orderings)
+      //                 + speciation with unresolved loss of one daughter ]
+      //   leaf node: U = r*dupBracket + (1-r)*R  (never resolved -> single gene)
+      // U carries NO duplication channel in phase 1 (a still-tetrasomic locus
+      // is not independently duplicated). r=1 => U == dupBracket => WHALE.
+      REAL uval = dupBracket(cid, ec);
+      uval *= r;
+      scale(uval);
+      if (r < 1.0) {
+        REAL rest = REAL();
+        if (this->getSpeciesLeft(speciesNode)) {
+          auto f = this->getSpeciesLeft(speciesNode)->node_index;
+          auto g = this->getSpeciesRight(speciesNode)->node_index;
+          auto fc = f * _gammaCatNumber + c;
+          auto gc = g * _gammaCatNumber + c;
+          // speciation: both daughters inherit U (both child orderings)
+          for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+            REAL t = (_uclvs[cs.left][fc] * _uclvs[cs.right][gc] +
+                      _uclvs[cs.right][fc] * _uclvs[cs.left][gc]) *
+                     (_PS[ec] * cs.frequency);
+            scale(t);
+            rest += t;
+          }
+          // speciation + unresolved loss of one daughter (SL acting on U)
+          REAL sl = (uu[fc] * _uEU[gc] + uu[gc] * _uEU[fc]) * _PS[ec];
+          scale(sl);
+          rest += sl;
+        } else {
+          // leaf species node: never resolved, seen as the single leaf gene
+          rest = p;
+        }
+        rest *= (1.0 - r);
+        scale(rest);
+        uval += rest;
+        scale(uval);
+      }
+      uu[ec] = uval;
+
+      // --- WGD transform: the retained fraction enters the U state (STEP 5) ---
       auto &uqTop = _dlclvsTop[cid];
       if (_hasWGD[e]) {
-        // WHALE DLWGD form: the duplicate is retained w.p. q, not retained
-        // w.p. 1-q. q=0 recovers the no-WGD model.
-        //   P_top = (1-q) P + q [ 2 E P + split ]
         double q = _q[e];
-        REAL pe = p;
-        REAL split = REAL();
-        for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
-          REAL t = _dlclvs[cs.left][ec] * _dlclvs[cs.right][ec] * cs.frequency;
-          scale(t);
-          split += t;
-        }
-        REAL keep = pe * (1.0 - q);                  // (1-q) P
-        REAL dup = (_uE[ec] * pe * 2.0 + split) * q; // q [2 E P + split]
+        REAL keep = p * (1.0 - q); // (1-q) R
+        REAL inj = uu[ec] * q;     // q U  (== q*dupBracket when r=1 -> WHALE)
         scale(keep);
-        scale(dup);
-        uqTop[ec] = keep + dup;
+        scale(inj);
+        uqTop[ec] = keep + inj;
       } else {
         uqTop[ec] = p;
       }
@@ -286,18 +396,50 @@ void UndatedDLMultiModel<REAL>::recomputeSpeciesProbabilities() {
         proba += temp;
         assert(proba < REAL(1.000001));
         _uE[ec] = proba;
-        // --- post-WGD extinction seen by the parent ---
-        // WHALE DLWGD form: the duplicate is retained w.p. q, not retained
-        // w.p. 1-q (asymmetric 1-or-2). q=0 recovers the no-WGD model.
-        //   E_top = (1-q) E + q E^2
+        // --- LORe: unresolved (tetrasomic) extinction EU (STEP 3) ---
+        //   EU = r*E^2 + (1-r)*( _PL + _PS*EU[fc]*EU[gc] )    (internal)
+        //   EU = r*E^2 + (1-r)*E                              (leaf)
+        // EU has no self-dependence, so it is a single postorder pass riding on
+        // the E fixed point. r=1 => EU == E^2 (the WHALE doubling term).
+        {
+          const double r = _resolutionProbs[e];
+          REAL E = _uE[ec];
+          REAL eu = E * E;
+          eu *= r;
+          scale(eu);
+          if (r < 1.0) {
+            REAL rest = REAL();
+            if (this->getSpeciesLeft(speciesNode)) {
+              auto f = this->getSpeciesLeft(speciesNode)->node_index;
+              auto g = this->getSpeciesRight(speciesNode)->node_index;
+              auto fc = f * _gammaCatNumber + c;
+              auto gc = g * _gammaCatNumber + c;
+              REAL lossU = REAL(_PL[ec]); // lost while still unresolved
+              scale(lossU);
+              rest += lossU;
+              REAL specU = _uEU[fc] * _uEU[gc] * _PS[ec]; // speciate, both U
+              scale(specU);
+              rest += specU;
+            } else {
+              rest = E; // leaf: single-lineage non-observation prob (via _fm)
+            }
+            rest *= (1.0 - r);
+            scale(rest);
+            eu += rest;
+            scale(eu);
+          }
+          _uEU[ec] = eu;
+        }
+        // --- WGD transform: the retained fraction enters the U state (STEP 5) ---
+        // E_top = (1-q) E + q EU  (== (1-q)E + q E^2 when r=1 -> WHALE/AORe).
         if (_hasWGD[e]) {
           double q = _q[e];
-          REAL e1 = _uE[ec];           // E
-          REAL term1 = e1 * (1.0 - q);  // (1-q) E
-          REAL term2 = e1 * e1 * q;     // q E^2
-          scale(term1);
-          scale(term2);
-          _uEtop[ec] = term1 + term2;
+          REAL E = _uE[ec];
+          REAL keep = E * (1.0 - q); // (1-q) E
+          REAL inj = _uEU[ec] * q;   // q EU
+          scale(keep);
+          scale(inj);
+          _uEtop[ec] = keep + inj;
         } else {
           _uEtop[ec] = _uE[ec];
         }
@@ -473,4 +615,258 @@ bool UndatedDLMultiModel<REAL>::computeProbability(
     return false;
   }
   return true;
+}
+
+/**
+ *  LORe resolution-branch marginal (WGD_LORE_marginal.md)
+ *
+ *  A U-aware backtrace. computeProbability() already samples the resolved
+ *  (R-state) events S/D/SL/DL/None proportionally to their inside contribution.
+ *  On top of that we add:
+ *   - the WGD R-vs-U coin when a lineage is inherited across the WGD branch
+ *     (STEP 2), and
+ *   - the unresolved (U-state) recursion (STEP 3), which emits a U->R commit
+ *     (records the species branch) when resolution fires.
+ *  All sampling weights are the exact terms of the inside recursion (same _PS,
+ *  ccp frequencies, q/r prefactors), so the sampled marginals are unbiased; the
+ *  `check` flag asserts weight==inside at every U cell and the coin (STEP 5.2).
+ */
+
+// helper: |log a - log b| small (robust to ScaledValue scaling); skips null
+template <class REAL> static inline bool loreInsideClose(const REAL &a,
+                                                         const REAL &b) {
+  double la = getLog(a);
+  double lb = getLog(b);
+  if (!std::isfinite(la) && !std::isfinite(lb)) {
+    return true; // both effectively zero
+  }
+  return std::fabs(la - lb) < 1e-6;
+}
+
+template <class REAL>
+corax_rnode_t *
+UndatedDLMultiModel<REAL>::sampleOriginationR(unsigned int &category) {
+  REAL total = REAL();
+  for (unsigned int c = 0; c < _gammaCatNumber; ++c) {
+    for (auto sp : this->getPrunedSpeciesNodes()) {
+      total += getRootCladeLikelihood(sp, c);
+    }
+  }
+  REAL toSample = this->getRandom(total);
+  REAL acc = REAL();
+  corax_rnode_t *last = nullptr;
+  for (unsigned int c = 0; c < _gammaCatNumber; ++c) {
+    for (auto sp : this->getPrunedSpeciesNodes()) {
+      acc += getRootCladeLikelihood(sp, c);
+      last = sp;
+      if (acc > toSample) {
+        category = c;
+        return sp;
+      }
+    }
+  }
+  category = 0;
+  return last;
+}
+
+template <class REAL>
+void UndatedDLMultiModel<REAL>::sampleResolutionCommits(
+    unsigned int samples, std::vector<double> &commitCounts, bool check) {
+  commitCounts.assign(this->getAllSpeciesNodeNumber(), 0.0);
+  auto rootCID = this->_ccp.getCladesNumber() - 1;
+  for (unsigned int s = 0; s < samples; ++s) {
+    unsigned int cat = 0;
+    auto origin = sampleOriginationR(cat);
+    // A lineage that ORIGINATES anywhere starts resolved (the inside root term
+    // uses raw _dlclvs, not the WGD-transformed _dlclvsTop).
+    std::vector<unsigned int> commits;
+    btR(rootCID, origin, cat, commits, check);
+    for (auto b : commits) {
+      commitCounts[b] += 1.0;
+    }
+  }
+}
+
+// Descend into a child species node; sample the WGD R-vs-U coin if it is the
+// WGD branch (STEP 2), otherwise continue resolved.
+template <class REAL>
+void UndatedDLMultiModel<REAL>::btDescend(CID cid, corax_rnode_t *sp,
+                                          unsigned int c,
+                                          std::vector<unsigned int> &commits,
+                                          bool check) {
+  auto e = sp->node_index;
+  if (!_hasWGD[e]) {
+    btR(cid, sp, c, commits, check);
+    return;
+  }
+  auto ec = e * _gammaCatNumber + c;
+  double q = _q[e];
+  REAL wR = _dlclvs[cid][ec] * (1.0 - q); // stay R
+  REAL wU = _uclvs[cid][ec] * q;          // become U
+  scale(wR);
+  scale(wU);
+  REAL total = wR + wU;
+  if (check && !loreInsideClose(total, _dlclvsTop[cid][ec])) {
+    // STEP 5.2: wR + wU must equal _dlclvsTop[cid][ec] (parent's consumed value)
+    std::cerr << "LORe STEP5.2 FAIL: WGD coin weights != _dlclvsTop at cid="
+              << cid << " e=" << e << std::endl;
+    std::abort();
+  }
+  REAL toSample = this->getRandom(total);
+  if (wR > toSample) {
+    btR(cid, sp, c, commits, check);
+  } else {
+    btU(cid, sp, c, commits, check);
+  }
+}
+
+// Resolved-state backtrace: reuse computeProbability to sample the R event,
+// then recurse (applying the WGD coin when descending into the WGD branch).
+template <class REAL>
+void UndatedDLMultiModel<REAL>::btR(CID cid, corax_rnode_t *sp, unsigned int c,
+                                    std::vector<unsigned int> &commits,
+                                    bool check) {
+  REAL proba = REAL();
+  if (!computeProbability(cid, sp, c, proba)) {
+    return;
+  }
+  ReconciliationCell<REAL> recCell;
+  recCell.maxProba = this->getRandom(proba);
+  REAL tmp = REAL();
+  if (!computeProbability(cid, sp, c, tmp, &recCell)) {
+    return;
+  }
+  switch (recCell.event.type) {
+  case ReconciliationEventType::EVENT_None:
+    return; // observed as a leaf gene
+  case ReconciliationEventType::EVENT_S:
+    btDescend(recCell.event.leftGeneIndex, this->getSpeciesLeft(sp), c, commits,
+              check);
+    btDescend(recCell.event.rightGeneIndex, this->getSpeciesRight(sp), c,
+              commits, check);
+    return;
+  case ReconciliationEventType::EVENT_D:
+    // duplication within the branch (below the WGD): children stay resolved
+    btR(recCell.event.leftGeneIndex, sp, c, commits, check);
+    btR(recCell.event.rightGeneIndex, sp, c, commits, check);
+    return;
+  case ReconciliationEventType::EVENT_SL:
+    btDescend(cid, recCell.event.pllDestSpeciesNode, c, commits, check);
+    return;
+  case ReconciliationEventType::EVENT_DL:
+    btR(cid, sp, c, commits, check); // duplication+loss -> resample this cell
+    return;
+  default:
+    return;
+  }
+}
+
+// Unresolved-state backtrace (STEP 3). Samples one term of the U recursion
+// proportionally; emits a U->R commit (records branch e) when resolution fires.
+template <class REAL>
+void UndatedDLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
+                                    std::vector<unsigned int> &commits,
+                                    bool check) {
+  auto e = sp->node_index;
+  auto ec = e * _gammaCatNumber + c;
+  double r = _resolutionProbs[e];
+  bool isLeaf = !this->getSpeciesLeft(sp);
+  unsigned int f = 0, g = 0, fc = 0, gc = 0;
+  if (!isLeaf) {
+    f = this->getSpeciesLeft(sp)->node_index;
+    g = this->getSpeciesRight(sp)->node_index;
+    fc = f * _gammaCatNumber + c;
+    gc = g * _gammaCatNumber + c;
+  }
+
+  // weight of each U term (mirrors the inside U recursion exactly)
+  REAL wResolve = dupBracket(cid, ec);
+  wResolve *= r;
+  scale(wResolve);
+  REAL total = wResolve;
+  REAL wLeaf = REAL();
+  if (isLeaf) {
+    wLeaf = _dlclvs[cid][ec] * (1.0 - r); // (1-r) R
+    scale(wLeaf);
+    total = total + wLeaf;
+  } else {
+    for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+      double w0 = (1.0 - r) * _PS[ec] * cs.frequency;
+      REAL s1 = _uclvs[cs.left][fc] * _uclvs[cs.right][gc] * w0;
+      REAL s2 = _uclvs[cs.right][fc] * _uclvs[cs.left][gc] * w0;
+      scale(s1);
+      scale(s2);
+      total = total + s1 + s2;
+    }
+    double w1 = (1.0 - r) * _PS[ec];
+    REAL sl1 = _uclvs[cid][fc] * _uEU[gc] * w1; // keep f, lose g (unresolved)
+    REAL sl2 = _uclvs[cid][gc] * _uEU[fc] * w1; // keep g, lose f (unresolved)
+    scale(sl1);
+    scale(sl2);
+    total = total + sl1 + sl2;
+  }
+  if (check && !loreInsideClose(total, _uclvs[cid][ec])) {
+    // STEP 5.2: the U-cell sampled-term weights must sum to the inside U CLV.
+    std::cerr << "LORe STEP5.2 FAIL: U-cell weights != _uclvs at cid=" << cid
+              << " e=" << e << std::endl;
+    std::abort();
+  }
+
+  // sample one term proportionally
+  REAL toSample = this->getRandom(total);
+  REAL acc = wResolve;
+  if (wResolve > toSample) {
+    // RESOLVE at branch e: the U->R commit (ohnolog divergence). Record it.
+    commits.push_back(e);
+    // sub-sample within dupBracket = 2*E*R + sum_splits ccp*R*R
+    REAL dTotal = dupBracket(cid, ec);
+    REAL dSample = this->getRandom(dTotal);
+    REAL dAcc = REAL();
+    for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+      REAL t = _dlclvs[cs.left][ec] * _dlclvs[cs.right][ec] * cs.frequency;
+      scale(t);
+      dAcc = dAcc + t;
+      if (dAcc > dSample) {
+        // both ohnolog copies survive and are now resolved
+        btR(cs.left, sp, c, commits, check);
+        btR(cs.right, sp, c, commits, check);
+        return;
+      }
+    }
+    // remainder: 2*E*R -> one copy survives (resolved), the other is lost
+    btR(cid, sp, c, commits, check);
+    return;
+  }
+  if (isLeaf) {
+    return; // (1-r) R term: unresolved locus observed as a single gene
+  }
+  // internal: speciate-U (both orderings per split), then SL-U
+  for (const auto &cs : this->_ccp.getCladeSplits(cid)) {
+    double w0 = (1.0 - r) * _PS[ec] * cs.frequency;
+    REAL s1 = _uclvs[cs.left][fc] * _uclvs[cs.right][gc] * w0;
+    scale(s1);
+    acc = acc + s1;
+    if (acc > toSample) {
+      btU(cs.left, this->getSpeciesLeft(sp), c, commits, check);
+      btU(cs.right, this->getSpeciesRight(sp), c, commits, check);
+      return;
+    }
+    REAL s2 = _uclvs[cs.right][fc] * _uclvs[cs.left][gc] * w0;
+    scale(s2);
+    acc = acc + s2;
+    if (acc > toSample) {
+      btU(cs.right, this->getSpeciesLeft(sp), c, commits, check);
+      btU(cs.left, this->getSpeciesRight(sp), c, commits, check);
+      return;
+    }
+  }
+  double w1 = (1.0 - r) * _PS[ec];
+  REAL sl1 = _uclvs[cid][fc] * _uEU[gc] * w1;
+  scale(sl1);
+  acc = acc + sl1;
+  if (acc > toSample) {
+    btU(cid, this->getSpeciesLeft(sp), c, commits, check); // keep f, lose g
+    return;
+  }
+  btU(cid, this->getSpeciesRight(sp), c, commits, check); // keep g, lose f
 }
