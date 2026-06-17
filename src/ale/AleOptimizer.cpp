@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "AleOptimizer.hpp"
 
 #include <algorithm>
@@ -458,7 +459,12 @@ void AleOptimizer::reconcile(unsigned int samples) {
     // all MPI ranks passed the loop
     _evaluator->sampleFamilyScenarios(i, samples, scenarios);
     allScenarios.insert(allScenarios.end(), scenarios.begin(), scenarios.end());
-    assert(scenarios.size() == samples);
+    // Usually scenarios.size() == samples. A few families are not samplable
+    // under the DTL+WGD/LORe state (the scenario backtrace hits the depth guard
+    // on every attempt; see MultiModel::sampleReconciliations) and yield fewer
+    // (or no) gene-tree samples. We iterate over what was sampled; the LORe
+    // resolution profile below is computed by a separate, robust backtrace.
+    unsigned int sampledScenarios = scenarios.size();
     // LORe: sample the per-branch WGD resolution-event (U->R commit) profile for
     // this family under the fitted r, and write the per-family expected counts.
     if (doResolution) {
@@ -486,7 +492,7 @@ void AleOptimizer::reconcile(unsigned int samples) {
     auto geneTreesAlePath = FileSystem::joinPaths(
         allRecDir, localFamilies[i].name + "_samples.alerec");
     ParallelOfstream geneTreesAleOs(geneTreesAlePath, false);
-    for (unsigned int sample = 0; sample < samples; ++sample) {
+    for (unsigned int sample = 0; sample < sampledScenarios; ++sample) {
       auto geneTreeXMLPath =
           FileSystem::joinPaths(allRecDir, localFamilies[i].name + "_sample_" +
                                                std::to_string(sample) + ".xml");
@@ -520,21 +526,24 @@ void AleOptimizer::reconcile(unsigned int samples) {
     }
     geneTreesOs.close();
     geneTreesAleOs.close();
-    // writing in the reconciliations/summaries/ dir
-    auto consensusFile = FileSystem::joinPaths(
-        summariesDir, localFamilies[i].name + "_consensus_50.newick");
-    saveGeneConsensusTree(geneTreesPath, consensusFile);
-    auto perSpeciesEventCountsFile = FileSystem::joinPaths(
-        summariesDir, localFamilies[i].name + "_meanSpeciesEventCounts.txt");
-    Scenario::mergePerSpeciesEventCounts(
-        getSpeciesTree().getTree(), perSpeciesEventCountsFile,
-        perSpeciesEventCountsFiles, false, true);
-    summaryPerSpeciesEventCountsFiles.push_back(perSpeciesEventCountsFile);
-    auto transferFile = FileSystem::joinPaths(
-        summariesDir, localFamilies[i].name + "_meanTransfers.txt");
-    Scenario::mergeTransfers(getSpeciesTree().getTree(), transferFile,
-                             transferFiles, false, true);
-    summaryTransferFiles.push_back(transferFile);
+    // writing in the reconciliations/summaries/ dir (skip for the rare families
+    // with no sampled gene tree -- see the sampledScenarios note above)
+    if (sampledScenarios > 0) {
+      auto consensusFile = FileSystem::joinPaths(
+          summariesDir, localFamilies[i].name + "_consensus_50.newick");
+      saveGeneConsensusTree(geneTreesPath, consensusFile);
+      auto perSpeciesEventCountsFile = FileSystem::joinPaths(
+          summariesDir, localFamilies[i].name + "_meanSpeciesEventCounts.txt");
+      Scenario::mergePerSpeciesEventCounts(
+          getSpeciesTree().getTree(), perSpeciesEventCountsFile,
+          perSpeciesEventCountsFiles, false, true);
+      summaryPerSpeciesEventCountsFiles.push_back(perSpeciesEventCountsFile);
+      auto transferFile = FileSystem::joinPaths(
+          summariesDir, localFamilies[i].name + "_meanTransfers.txt");
+      Scenario::mergeTransfers(getSpeciesTree().getTree(), transferFile,
+                               transferFiles, false, true);
+      summaryTransferFiles.push_back(transferFile);
+    }
   }
   ParallelContext::barrier();
   ParallelContext::makeRandConsistent();

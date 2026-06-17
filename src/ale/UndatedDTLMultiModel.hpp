@@ -104,6 +104,15 @@ private:
   // --- LORe (delayed rediploidization) extension ---
   std::vector<REAL> _uEU;          // unresolved (tetrasomic) extinction, per (e,cat)
   std::vector<double> _resolutionProbs; // per species branch: r in [0,1]; 1==AORe
+  // resolution-backtrace: number of lineages abandoned at the resample cap (a
+  // degenerate cell where only DL/TL "nothing observed" events have mass).
+  size_t _btCapHits = 0;
+  // hard per-sample backstop: total backtrace steps (across btR/btU/btDescend).
+  // Reset before each sample; once exceeded, every call returns immediately so
+  // the recursion unwinds and the (pathological) sample is abandoned. Bounds any
+  // runaway, whether an iterative loop or an inter-function re-entry.
+  size_t _btSteps = 0;
+  static const size_t kBtStepCap = 50000;
   OriginationStrategy _originationStrategy;
   TransferConstaint _transferConstraint;
   // Forbidden transfers, per species branch
@@ -176,6 +185,31 @@ private:
     REAL out = _uE[ec] * _dtlclvs[cid]._uq[ec] * 2.0 + split;
     scale(out);
     return out;
+  }
+
+  // TEMP debug guard for the resolution backtrace: validate (sp, cid) before any
+  // pointer deref / array index, aborting with a clear message instead of
+  // segfaulting. Used to localise the residual DTL export crash.
+  void btGuard(const char *where, CID cid, corax_rnode_t *sp) {
+    bool bad = false;
+    if (!sp) {
+      std::cerr << "[BTDBG] NULL sp in " << where << " cid=" << cid << std::endl;
+      bad = true;
+    } else if (sp->node_index >= this->getAllSpeciesNodeNumber()) {
+      std::cerr << "[BTDBG] OOB node_index=" << sp->node_index
+                << " (N=" << this->getAllSpeciesNodeNumber() << ") in " << where
+                << " cid=" << cid << std::endl;
+      bad = true;
+    }
+    if (cid >= _dtlclvs.size()) {
+      std::cerr << "[BTDBG] OOB cid=" << cid << " (nClades=" << _dtlclvs.size()
+                << ") in " << where << std::endl;
+      bad = true;
+    }
+    if (bad) {
+      std::cerr.flush();
+      std::abort();
+    }
   }
 
   // functions to work with _llCache
@@ -1054,6 +1088,7 @@ void UndatedDTLMultiModel<REAL>::sampleResolutionCommits(
     // A lineage that ORIGINATES anywhere starts resolved (the root term uses
     // raw _uq, not the WGD-transformed _uqTop).
     std::vector<unsigned int> commits;
+    _btSteps = 0; // reset the hard per-sample backstop
     btR(rootCID, origin, cat, commits, check);
     for (auto b : commits) {
       commitCounts[b] += 1.0;
@@ -1068,6 +1103,10 @@ void UndatedDTLMultiModel<REAL>::btDescend(CID cid, corax_rnode_t *sp,
                                            unsigned int c,
                                            std::vector<unsigned int> &commits,
                                            bool check) {
+  if (++_btSteps > kBtStepCap) {
+    return; // hard per-sample backstop
+  }
+  btGuard("btDescend", cid, sp);
   auto e = sp->node_index;
   if (!_hasWGD[e]) {
     btR(cid, sp, c, commits, check);
@@ -1108,7 +1147,24 @@ template <class REAL>
 void UndatedDTLMultiModel<REAL>::btR(CID cid, corax_rnode_t *sp, unsigned int c,
                                      std::vector<unsigned int> &commits,
                                      bool check) {
+  // Cap on consecutive "nothing observed" (DL/TL) resamples. At a degenerate
+  // cell where the terminating events (None/S/D/T/SL) all have zero mass, the
+  // resample loop cannot escape (the stock recursive sampler overflows the
+  // stack here -> SIGSEGV; the iterative form would spin). Such a lineage is an
+  // unobservable DL/TL chain of negligible probability, so abandon it after the
+  // cap (record no further commits). Any cell with escape probability > ~1e-4
+  // escapes well within the cap, so the resolution marginals are unbiased.
+  size_t resamples = 0;
+  const size_t kResampleCap = 1000;
   while (true) {
+    if (++_btSteps > kBtStepCap) {
+      return; // hard per-sample backstop
+    }
+    if (++resamples > kResampleCap) {
+      ++_btCapHits;
+      return;
+    }
+    btGuard("btR.loop", cid, sp);
     REAL proba = REAL();
     if (!computeProbability(cid, sp, c, proba)) {
       return;
@@ -1147,6 +1203,12 @@ void UndatedDTLMultiModel<REAL>::btR(CID cid, corax_rnode_t *sp, unsigned int c,
       // the species tree, so loop rather than recurse. At a WGD child the R/U
       // coin must fire (may switch to the U state) -> delegate to btDescend.
       corax_rnode_t *child = recCell.event.pllDestSpeciesNode;
+      if (!child) {
+        std::cerr << "[BTDBG] SL null pllDestSpeciesNode cid=" << cid
+                  << " e=" << sp->node_index << std::endl;
+        std::cerr.flush();
+        std::abort();
+      }
       if (_hasWGD[child->node_index]) {
         btDescend(cid, child, c, commits, check);
         return;
@@ -1181,7 +1243,16 @@ void UndatedDTLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
   // lose the other): like SL in btR these consume no gene split and can chain
   // down the species tree, so they must not recurse. resolve and speciate-U
   // consume a split / terminate, so they stay recursive (bounded).
+  size_t uIters = 0;
   while (true) {
+  if (++_btSteps > kBtStepCap) {
+    return; // hard per-sample backstop
+  }
+  if (++uIters > 5000) { // safety bound (SL-U walk; normally <= tree height)
+    ++_btCapHits;
+    return;
+  }
+  btGuard("btU.loop", cid, sp);
   auto e = sp->node_index;
   auto ec = e * _gammaCatNumber + c;
   double r = _resolutionProbs[e];

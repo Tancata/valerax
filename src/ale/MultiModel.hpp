@@ -213,6 +213,17 @@ private:
    */
   bool backtrace(CID cid, corax_rnode_t *speciesNode, corax_unode_t *geneNode,
                  unsigned int category, Scenario &scenario, bool stochastic);
+
+  // Backtrace recursion-depth guard. The reconciliation backtrace recurses on
+  // the DL/TL "nothing observed, resample" events; at a degenerate cell (where
+  // the terminating events have vanishing probability) this recursion can go
+  // arbitrarily deep and overflow the stack (observed under DTL+WGD/LORe, where
+  // the retention transform suppresses speciation at the WGD branch). The
+  // counter is reset per scenario; once it exceeds the cap, backtrace returns
+  // false (the scenario is discarded and resampled). A legitimate scenario
+  // never approaches the cap.
+  size_t _btScenarioSteps = 0;
+  static const size_t kBtScenarioCap = 50000; // max recursion depth
 };
 
 template <class REAL> double MultiModel<REAL>::computeLogLikelihood() {
@@ -279,10 +290,21 @@ bool MultiModel<REAL>::sampleReconciliations(
   // sample and save scenarios
   bool ok = true;
   for (unsigned int i = 0; i < samples; ++i) {
-    scenarios.push_back(std::make_shared<Scenario>());
-    ok &= computeScenario(*scenarios.back(), true);
-    if (!ok)
-      break;
+    // A scenario can be discarded if it hits the backtrace depth guard (a
+    // degenerate DL/TL resample chain); retry with a fresh random path and keep
+    // only a *complete* (uncapped) scenario. A capped backtrace yields an
+    // incomplete gene tree (a DL/TL-trapped lineage never reaches an observed
+    // leaf), so it must not be emitted. A few pathological families (degenerate
+    // likelihood under the DTL+WGD/LORe state) hit the guard on every attempt
+    // and contribute fewer (or no) sampled gene trees; the run still terminates,
+    // and the LORe resolution profile is produced by a separate backtrace.
+    for (unsigned int attempt = 0; attempt < 8; ++attempt) {
+      auto scenario = std::make_shared<Scenario>();
+      if (computeScenario(*scenario, true)) {
+        scenarios.push_back(scenario);
+        break;
+      }
+    }
   }
   if (this->_memorySavings) {
     // delete CLVs to use less RAM
@@ -341,6 +363,7 @@ bool MultiModel<REAL>::computeScenario(Scenario &scenario, bool stochastic) {
   auto virtualRootIndex = 2 * this->_ccp.getLeafNumber();
   scenario.setVirtualRootIndex(virtualRootIndex);
   // run sampling recursion
+  _btScenarioSteps = 0; // reset the per-scenario depth guard
   auto ok = backtrace(rootCID, originationSpecies, geneRoot, category, scenario,
                       stochastic);
   return ok;
@@ -350,6 +373,18 @@ template <class REAL>
 bool MultiModel<REAL>::backtrace(CID cid, corax_rnode_t *speciesNode,
                                  corax_unode_t *geneNode, unsigned int category,
                                  Scenario &scenario, bool stochastic) {
+  // Bound the recursion DEPTH (not total calls): a degenerate DL/TL resample
+  // chain recurses without bound and overflows the stack, while large but
+  // shallow gene trees are unaffected. RAII keeps _btScenarioSteps equal to the
+  // current depth (incremented on entry, decremented on every return path).
+  struct DepthGuard {
+    size_t &d;
+    DepthGuard(size_t &x) : d(x) { ++d; }
+    ~DepthGuard() { --d; }
+  } depthGuard(_btScenarioSteps);
+  if (_btScenarioSteps > kBtScenarioCap) {
+    return false; // too deep -> discard this scenario and resample
+  }
   auto c = category;
   REAL proba;
   // compute the probability of the clade on the species branch
