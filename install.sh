@@ -18,9 +18,9 @@ mkdir build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 
-if ask_yes_no "Build only AleRax binary (otherwise build everything)?"; then
-    echo "Building AleRax..."
-    make -j $num_cores alerax
+if ask_yes_no "Build only kalerax binary (otherwise build everything)?"; then
+    echo "Building kalerax..."
+    make -j $num_cores kalerax
 else
     echo "Building everything..."
     make -j $num_cores

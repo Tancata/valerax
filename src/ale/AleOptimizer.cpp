@@ -437,12 +437,13 @@ void AleOptimizer::reconcile(unsigned int samples) {
         MatrixDouble(highways.size(), VectorDouble(localFamilies.size(), 0.0));
   }
   // LORe: per-species WGD resolution-event (U->R commit) profile, accumulated
-  // over families. Only for the DL model with a declared WGD, full (unpruned)
+  // over families. For the DL or DTL model with a declared WGD, full (unpruned)
   // species tree, and CLVs kept in RAM (no memory savings). See
   // WGD_LORE_marginal.md STEP 4.
   const auto &recInfo = _evaluator->getRecModelInfo();
   bool doResolution = !_evaluator->getWGDNodes().empty() &&
-                      recInfo.model == RecModel::UndatedDL &&
+                      (recInfo.model == RecModel::UndatedDL ||
+                       recInfo.model == RecModel::UndatedDTL) &&
                       !recInfo.pruneSpeciesTree && !recInfo.memorySavings;
   std::vector<double> totalResolution(getSpeciesTree().getTree().getNodeNumber(),
                                       0.0);

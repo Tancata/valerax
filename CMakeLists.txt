@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.11)
 
-project(AleRaxProject
+project(kaleraxProject
         VERSION 0.0)
 
 set(ALERAX_BUILD_AS_LIBRARY OFF CACHE BOOL "Build AleRax as shared library (instead of stand-alone executable)")

@@ -1,22 +1,27 @@
 
 
-# Valerax — a WGD-focused fork of AleRax
+# kalerax — a WGD/LORe-focused fork of AleRax
 
-> **This is a fork of [AleRax](https://github.com/BenoitMorel/AleRax).** It adds
+> **This is a fork of [AleRax](https://github.com/BenoitMorel/AleRax)** (the
+> binary is named `kalerax`, to keep it distinct from upstream AleRax). It adds
 > support for modelling **whole-genome duplications (WGD)** in AleRax's undated
 > reconciliation models: a WGD can be declared on any species branch with a
 > per-branch retention parameter `q`, which is then estimated by maximum
 > likelihood — letting you test WGD hypotheses the way
 > [WHALE](https://github.com/arzwa/Whale.jl) does, but on AleRax's amalgamated
-> DL and DTL likelihoods.
+> DL and DTL likelihoods. It also models **lineage-specific rediploidization
+> (LORe)** via `--lore` — delayed ohnolog divergence with a fitted global
+> resolution probability `r` — for **both** the DL and the DTL model.
 >
 > 📄 **Start here: [`WGD_REPORT.md`](WGD_REPORT.md)** — a short, readable report
 > covering the implementation, a benchmark against WHALE, and what allowing
-> horizontal transfers (DL vs DTL) does to the evidence for WGD.
+> horizontal transfers (DL vs DTL) does to the evidence for WGD;
+> [`DTL_LORE.md`](DTL_LORE.md) documents the DTL+LORe model.
 >
-> The WGD code lives mainly in `src/ale/UndatedDLMultiModel.hpp` and
-> `src/ale/UndatedDTLMultiModel.hpp`, exposed via the `--wgd` command-line
-> option; cross-validation inputs and recipes are under `validation/`. This is a
+> The WGD/LORe code lives mainly in `src/ale/UndatedDLMultiModel.hpp` and
+> `src/ale/UndatedDTLMultiModel.hpp`, exposed via the `--wgd` and `--lore`
+> command-line options; cross-validation inputs and recipes are under
+> `validation/`. This is a
 > research prototype — see the report's *Limitations*. Everything below is the
 > upstream AleRax documentation.
 >
@@ -83,10 +88,10 @@ To build the sources:
 
 The generated executable is located here:
 ```
-build/bin/alerax
+build/bin/kalerax
 ```
 
-To copy the executable to your PATH, such that you can call alerax from anywhere:
+To copy the executable to your PATH, such that you can call kalerax from anywhere:
 ```
 cd build
 sudo make install

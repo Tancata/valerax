@@ -1,5 +1,5 @@
 
-set(alerax_SOURCES ale.cpp
+set(kalerax_SOURCES ale.cpp
   AleArguments.cpp
   AleEvaluator.cpp
   AleOptimizer.cpp
@@ -9,9 +9,11 @@ set(alerax_SOURCES ale.cpp
   TrimFamilies.cpp
   )
 
-add_program(alerax "${alerax_SOURCES}")
-target_link_libraries(alerax PRIVATE mpi-scheduler)
-install(TARGETS alerax DESTINATION bin)
+# kalerax: the WGD/LORe fork of AleRax. The binary is named distinctly from the
+# upstream AleRax executable.
+add_program(kalerax "${kalerax_SOURCES}")
+target_link_libraries(kalerax PRIVATE mpi-scheduler)
+install(TARGETS kalerax DESTINATION bin)
 
 # WGD regression test (not installed): _hasWGD all-false must reproduce the
 # original DL likelihood. See tests/wgd_regression.cpp.

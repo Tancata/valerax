@@ -436,7 +436,8 @@ void AleArguments::printHelp() const {
                << "branch or the branch to the LCA of two taxa; repeatable)"
                << std::endl;
   Logger::info << "\t--lore (estimate delayed rediploidization: fit a global "
-               << "resolution prob r; requires --wgd and --rec-model UndatedDL)"
+               << "resolution prob r; requires --wgd and --rec-model UndatedDL "
+               << "or UndatedDTL)"
                << std::endl;
 
   Logger::info << "Search strategy options:" << std::endl;
@@ -534,10 +535,11 @@ void AleArguments::checkValid() const {
       ok = false;
       Logger::info << "\nError: --lore requires at least one --wgd" << std::endl;
     }
-    if (reconciliationModelStr != "UndatedDL") {
+    if (reconciliationModelStr != "UndatedDL" &&
+        reconciliationModelStr != "UndatedDTL") {
       ok = false;
-      Logger::info << "\nError: --lore is only implemented for "
-                   << "--rec-model UndatedDL (phase 1)" << std::endl;
+      Logger::info << "\nError: --lore requires --rec-model UndatedDL or "
+                   << "UndatedDTL" << std::endl;
     }
   }
   if (d <= 0.0 || l <= 0.0 || t <= 0.0) {
