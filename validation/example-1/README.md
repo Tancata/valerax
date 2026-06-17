@@ -52,10 +52,10 @@ cd /tmp/wgd_example1
 python3 make_inputs.py --root /tmp/wgd_example1   # rewrites families.txt + mappings
 ```
 
-Then run AleRax (species tree fixed; WGD node indices are tied to the topology):
+Then run kalerax (species tree fixed; WGD node indices are tied to the topology):
 
 ```sh
-<repo>/build/bin/alerax \
+<repo>/build/bin/kalerax \
   -f /tmp/wgd_example1/families.txt \
   -s /tmp/wgd_example1/tree.nw \
   --rec-model UndatedDL \

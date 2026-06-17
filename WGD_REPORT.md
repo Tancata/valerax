@@ -1,9 +1,15 @@
-# Whole-genome duplication (WGD) inference in AleRax
+# Whole-genome duplication (WGD) inference in kalerax
 
-This is a working report on an extension to [AleRax](https://github.com/BenoitMorel/AleRax)
+> **Naming.** The tool/binary described here is **`kalerax`**, a fork of
+> [AleRax](https://github.com/BenoitMorel/AleRax). Throughout this report
+> "kalerax" means this fork (the `kalerax` binary); "AleRax" means the upstream
+> framework it builds on. (This fork was previously called *valerax*.)
+
+This is a working report on **kalerax**, an extension to
+[AleRax](https://github.com/BenoitMorel/AleRax)
 that adds **whole-genome duplication (WGD) modelling** to its undated
 gene-tree/species-tree reconciliation likelihood, with a per-branch retention
-parameter `q`. The goal is to let AleRax test hypothetical WGDs (and estimate
+parameter `q`. The goal is to let kalerax test hypothetical WGDs (and estimate
 how many duplicated copies were retained) the way
 [WHALE](https://github.com/arzwa/Whale.jl) (Zwaenepoel & Van de Peer 2019) does,
 while reusing AleRax's fast amalgamated-likelihood machinery and extending it to
@@ -59,7 +65,7 @@ counterpart, so the likelihood is **bit-for-bit identical to stock AleRax**
 
 ### Using it
 ```sh
-alerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+kalerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
        --gene-tree-rooting UNIFORM --species-tree-search SKIP \
        --wgd PPAT --wgd ATHA,ATRI -p output_dir
 ```
@@ -237,8 +243,10 @@ signal) `r̂ → 1` and the model ties AORe.
 - The resolution branch is a *posterior readout under one global `r`*, not a free
   per-branch rate; and the timing is a resolution **branch**, not a dated time
   (the undated model infers *where*, not *when*).
-- Implemented for the DL model only (no transfers), one WGD at a time in the
-  validated toy.
+- Implemented for both the DL and the DTL model (`--lore` accepts
+  `--rec-model UndatedDL` or `UndatedDTL`). In the DTL model the unresolved
+  (tetrasomic) state propagates **vertically only**: transfers act on resolved
+  lineages and a transferred copy is born resolved (see [`DTL_LORE.md`](DTL_LORE.md)).
 
 ---
 
@@ -253,8 +261,9 @@ signal) `r̂ → 1` and the model ties AORe.
   burst of small-scale duplications on the same branch. This DL/DTL+WGD model is
   a scaffold; distinguishing the two would need a synteny-block coupling layer
   (a planned future direction).
-- The DTL port currently has an empirical regression check (no-WGD likelihood
-  unchanged); a dedicated C++ unit test like the DL model's is still to add.
+- The DTL WGD/LORe port is covered by empirical regression checks (no-WGD and
+  r=1/AORe likelihoods reproduced bit-for-bit; backtrace consistency guard;
+  `tests/dtl_lore_regression.sh`) rather than a dedicated C++ unit test.
 
 ---
 
@@ -264,7 +273,7 @@ signal) `r̂ → 1` and the model ties AORe.
 # build (no MPI):
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDISABLE_MPI=ON
-cmake --build . --target alerax wgd_regression lore_marginal -j4
+cmake --build . --target kalerax wgd_regression lore_marginal -j4
 
 # WGD regression + LORe r=1 gate (no-WGD == stock, q->0, r=1 == WHALE):
 ./bin/wgd_regression <species_tree> <gene_trees> <mapping>
@@ -272,11 +281,15 @@ cmake --build . --target alerax wgd_regression lore_marginal -j4
 # LORe resolution-branch marginal (recovers the simulated commit branch):
 ./bin/lore_marginal <species_tree> <geneTree> <taxonA> <taxonB> <AORe|LORe>
 
-# run a WGD + LORe analysis (DL model), writing the resolution profile:
-./bin/alerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+# run a WGD + LORe analysis (DL *or* DTL model), writing the resolution profile:
+./bin/kalerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
   --gene-tree-rooting UNIFORM --species-tree-search SKIP \
   --wgd ATAXON,BTAXON --lore -p out
+#   (--rec-model UndatedDTL also supported for --lore; see DTL_LORE.md)
 #   -> out/reconciliations/{totalSpeciesResolutionCounts,wgdSummary}.txt
+
+# DTL+LORe regression gate (null <= AORe <= LORe on validation/example-1):
+bash tests/dtl_lore_regression.sh ./bin/kalerax
 
 # WHALE benchmark inputs and the exact run recipe:
 #   validation/example-1/README.md
