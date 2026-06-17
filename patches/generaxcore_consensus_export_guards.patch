@@ -1,0 +1,65 @@
+diff --git a/src/trees/PLLRootedTree.cpp b/src/trees/PLLRootedTree.cpp
+index d9ef7f7..5119d36 100644
+--- a/src/trees/PLLRootedTree.cpp
++++ b/src/trees/PLLRootedTree.cpp
+@@ -799,13 +799,27 @@ PLLRootedTree::buildConsensusTree(const std::vector<std::string> &strOrFiles,
+   const std::string OUTGROUP_LABEL = "alerax_internal_str_for_outgroup";
+   std::vector<std::shared_ptr<PLLUnrootedTree>> outgroupTrees;
+   for (auto &str : strOrFiles) {
+-    auto tree = PLLRootedTree::buildFromStrOrFile(str);
+-    outgroupTrees.push_back(
+-        PLLUnrootedTree::buildWithOutgroupFromRooted(*tree, OUTGROUP_LABEL));
++    // A degenerate/truncated sampled scenario (observed under the fitted
++    // high-q WGD/LORe export) can write a malformed newick that readRooted
++    // rejects with a LibpllException. Skip such trees rather than letting the
++    // exception escape and abort the whole reconciliation export.
++    try {
++      auto tree = PLLRootedTree::buildFromStrOrFile(str);
++      outgroupTrees.push_back(
++          PLLUnrootedTree::buildWithOutgroupFromRooted(*tree, OUTGROUP_LABEL));
++    } catch (...) {
++      continue;
++    }
++  }
++  if (outgroupTrees.empty()) {
++    return ""; // no parseable sampled tree; caller skips writing the consensus
+   }
+   // this is the unrooted consensus newick with the outgroup
+   auto consensusStr =
+       PLLUnrootedTree::buildConsensusTree(outgroupTrees, threshold);
++  if (consensusStr.empty()) {
++    return ""; // degenerate sample set; caller skips writing the consensus
++  }
+   PLLUnrootedTree consensus(consensusStr, false);
+   // convert it to rooted consensus string
+   auto rootedStr = PLLRootedTree::getRootedNewickFromOutgroup(
+diff --git a/src/trees/PLLUnrootedTree.cpp b/src/trees/PLLUnrootedTree.cpp
+index 8dda8c7..99b1852 100644
+--- a/src/trees/PLLUnrootedTree.cpp
++++ b/src/trees/PLLUnrootedTree.cpp
+@@ -141,6 +141,13 @@ std::string PLLUnrootedTree::buildConsensusTree(
+     const std::vector<std::shared_ptr<PLLUnrootedTree>> &trees,
+     double threshold) {
+   assert(threshold >= 0.0 && threshold <= 1.0);
++  // Runtime guards (not just asserts): in a release build NDEBUG strips the
++  // asserts below, so a degenerate sample set (corax returns a null consensus,
++  // observed under the fitted high-q WGD/LORe export) would fall through to
++  // export_newick(null) -> SIGSEGV. Return "" instead; the caller skips it.
++  if (trees.empty()) {
++    return "";
++  }
+   std::vector<const corax_utree_t *> treePointers;
+   std::vector<double> weights;
+   for (auto &tree : trees) {
+@@ -153,8 +160,9 @@ std::string PLLUnrootedTree::buildConsensusTree(
+   assert(weights.size());
+   auto consensus = corax_utree_weight_consensus(
+       &(treePointers[0]), &(weights[0]), threshold, treePointers.size());
+-  assert(consensus);
+-  assert(consensus->tree);
++  if (!consensus || !consensus->tree) {
++    return "";
++  }
+   auto node = consensus->tree;
+   auto newick = corax_utree_export_newick(node, consensus_serialize);
+   return newick;

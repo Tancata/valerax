@@ -120,6 +120,31 @@ families contribute fewer (or no) sampled gene trees but are otherwise handled
 gracefully; the resolution profile is still written. The bundled regression gate
 still passes and the full salmonid DTL+LORe export now completes.
 
+**Second fix — consensus-tree null-deref at the corrected high `q`.** Once the
+retention optimiser was fixed (golden-section refinement; `q̂` rises from the
+`s`-parameterisation plateau of 0.667 to ~0.78–0.93), the export crashed again,
+but for an unrelated reason: at the higher fitted `q` a handful of families yield
+a degenerate or empty set of sampled gene trees, and the per-family **consensus
+tree** builder (`corax_utree_weight_consensus`) returns null / a malformed
+newick. In a release build `NDEBUG` strips corax's internal `assert`s, so this
+fell through to `export_newick(null)` (SIGSEGV) or an uncaught `LibpllException`
+(SIGABRT). Fix: convert those stripped asserts into runtime guards that return an
+empty consensus, wrap the per-tree parse so an unparseable sampled tree is
+skipped, and have `AleOptimizer::saveGeneConsensusTree` skip writing when the
+consensus is empty (`src/ale/AleOptimizer.cpp`, plus the GeneRaxCore submodule —
+see `patches/generaxcore_consensus_export_guards.patch`). The recursion-depth cap
+was also lowered (50000 → 8000) to stay well below the 64 MB stack guard page,
+since the higher `q` deepens the degenerate resample chain. The resolution
+profile is unaffected (it comes from a separate U-aware backtrace, not the
+gene-tree consensus). The full salmonid DL+LORe and DTL+LORe exports now complete
+at the corrected `q̂`.
+
+**Operational note — gene-tree sample output is large.** A full `-g 30` export
+writes per-family sampled gene trees to `reconciliations/all/` (~150 GB for the
+16,760-family salmonid set). Only the small `totalSpeciesResolutionCounts.txt`
+profile is needed for the LORe readout; delete `all/` after a run if disk is
+tight.
+
 **Caveat — checkpoint resume does not restore q/r.** `AleState` does not
 serialise the WGD retention `q` or the LORe resolution `r`, and a checkpoint
 resume skips the retention/resolution optimisation. So **resuming** a

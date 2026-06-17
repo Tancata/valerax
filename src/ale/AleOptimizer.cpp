@@ -358,7 +358,13 @@ void AleOptimizer::saveGeneConsensusTree(const std::string &geneSampleFile,
     }
   }
   is.close();
+  if (rtreeStrs.empty()) {
+    return; // no sampled gene trees for this family (degenerate at high q)
+  }
   auto consRtreeStr = PLLRootedTree::buildConsensusTree(rtreeStrs, 0.50001);
+  if (consRtreeStr.empty()) {
+    return; // corax could not form a consensus; skip rather than crash
+  }
   std::ofstream os(outputFile);
   os << consRtreeStr << std::endl;
   os.close();

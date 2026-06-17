@@ -223,7 +223,11 @@ private:
   // false (the scenario is discarded and resampled). A legitimate scenario
   // never approaches the cap.
   size_t _btScenarioSteps = 0;
-  static const size_t kBtScenarioCap = 50000; // max recursion depth
+  static const size_t kBtScenarioCap = 8000; // max recursion depth (kept well
+  // below the ~64MB stack's overflow threshold: at the fitted high-q retention
+  // the degenerate resample chain recurses deeper, and 50000 frames overflowed
+  // the stack guard page *before* this cap fired. Real scenarios never approach
+  // a few thousand; only degenerate resample chains do.
 };
 
 template <class REAL> double MultiModel<REAL>::computeLogLikelihood() {
