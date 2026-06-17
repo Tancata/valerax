@@ -97,18 +97,33 @@ kalerax -f families.txt -s species_tree.nw --rec-model UndatedDTL \
   the LORe signal.
 - Like the rest of the WGD/LORe code, this is a research prototype.
 
-## Known issue (DTL resolution-profile export)
+## Resolved issue: reconciliation-export stack overflow
 
-The DTL+LORe **optimisation** (q̂, r̂, joint lnL, LRT) is exact and complete. The
-subsequent **resolution-profile export** (the U-aware backtrace, written only
-when sampling reconciliations with `--lore`) has a residual, data-dependent
-crash on a small number of large families. Commit `4161a46` removed the
-stack-overflow path (DL/TL/SL single-lineage tail moves are now iterative, not
-recursive, and the consistency guard + regression gate pass); a separate
-deterministic crash on a specific family remains under investigation. It affects
-only the per-branch resolution *profile*, not any likelihood, retention,
-resolution-probability, or LRT. A genome-wide profile can still be obtained by
-aggregating the per-family `*_meanResolutionCounts.txt` files that were written
-(they are deterministic), which is what the salmonid analysis did for the ~68 %
-of families completed before the crash; that partial profile matches the
-complete DL profile closely.
+The DTL+LORe **optimisation** (q̂, r̂, joint lnL, LRT) was always exact. The
+**reconciliation export** (writing the resolution-branch profile and the sampled
+gene trees) used to crash ~91 % of the way through a large run.
+
+**Root cause.** The reconciliation backtrace recurses on the DL/TL
+"nothing observed, resample" events. Under the DTL+WGD/LORe fitted state the
+retention transform suppresses speciation probability at the WGD branch, so for
+a few families a cell's terminating-event probability becomes vanishingly small
+(precision-dependent) and the resample recursion goes essentially unbounded ->
+**stack overflow (SIGSEGV)**. This was a latent property of the stock
+amalgamated-likelihood scenario sampler (`MultiModel::backtrace`), not of the
+LORe code, exposed by the DTL+LORe likelihood surface.
+
+**Fix** (commit `f83197c`): the scenario backtrace now caps the recursion
+*depth* (RAII guard; large-but-shallow gene trees are unaffected) and
+discards-and-resamples a runaway scenario; the LORe `btR`/`btU` backtraces have a
+per-cell resample cap and a hard per-sample step backstop. A few un-samplable
+families contribute fewer (or no) sampled gene trees but are otherwise handled
+gracefully; the resolution profile is still written. The bundled regression gate
+still passes and the full salmonid DTL+LORe export now completes.
+
+**Caveat — checkpoint resume does not restore q/r.** `AleState` does not
+serialise the WGD retention `q` or the LORe resolution `r`, and a checkpoint
+resume skips the retention/resolution optimisation. So **resuming** a
+`--wgd … --lore` run reconciles with the *starting* q/r (q0, r=0.9), not the
+fitted values — `wgdSummary.txt` will show those starting values. Run the
+analysis **in one process** (do not resume) when you need the resolution profile
+under the fitted q/r.
