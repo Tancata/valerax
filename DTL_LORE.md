@@ -96,3 +96,19 @@ kalerax -f families.txt -s species_tree.nw --rec-model UndatedDTL \
   resolution-timing profile is stable across the two, transfers are not driving
   the LORe signal.
 - Like the rest of the WGD/LORe code, this is a research prototype.
+
+## Known issue (DTL resolution-profile export)
+
+The DTL+LORe **optimisation** (q̂, r̂, joint lnL, LRT) is exact and complete. The
+subsequent **resolution-profile export** (the U-aware backtrace, written only
+when sampling reconciliations with `--lore`) has a residual, data-dependent
+crash on a small number of large families. Commit `4161a46` removed the
+stack-overflow path (DL/TL/SL single-lineage tail moves are now iterative, not
+recursive, and the consistency guard + regression gate pass); a separate
+deterministic crash on a specific family remains under investigation. It affects
+only the per-branch resolution *profile*, not any likelihood, retention,
+resolution-probability, or LRT. A genome-wide profile can still be obtained by
+aggregating the per-family `*_meanResolutionCounts.txt` files that were written
+(they are deterministic), which is what the salmonid analysis did for the ~68 %
+of families completed before the crash; that partial profile matches the
+complete DL profile closely.
