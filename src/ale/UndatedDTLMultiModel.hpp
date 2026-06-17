@@ -1096,59 +1096,77 @@ void UndatedDTLMultiModel<REAL>::btDescend(CID cid, corax_rnode_t *sp,
 
 // Resolved-state backtrace: reuse computeProbability to sample the R event,
 // then recurse (applying the WGD coin when descending into the WGD branch).
+//
+// The "nothing observed, resample" events (DL, and TL) do not consume a gene-
+// clade split, so they are handled by LOOPING (re-sampling the same cell, or
+// the same gene at the transfer destination) rather than recursing — recursing
+// on them is unbounded and overflows the stack on large families (the DL+TL
+// self-loop mass is substantial under the DTL model). The branching events
+// (S/D/T/SL) each consume a clade split and/or descend the species tree, so
+// they stay recursive (bounded by the gene-tree / species-tree size).
 template <class REAL>
 void UndatedDTLMultiModel<REAL>::btR(CID cid, corax_rnode_t *sp, unsigned int c,
                                      std::vector<unsigned int> &commits,
                                      bool check) {
-  REAL proba = REAL();
-  if (!computeProbability(cid, sp, c, proba)) {
-    return;
-  }
-  ReconciliationCell<REAL> recCell;
-  recCell.maxProba = this->getRandom(proba);
-  REAL tmp = REAL();
-  if (!computeProbability(cid, sp, c, tmp, &recCell)) {
-    return;
-  }
-  switch (recCell.event.type) {
-  case ReconciliationEventType::EVENT_None:
-    return; // observed as a leaf gene
-  case ReconciliationEventType::EVENT_S:
-    btDescend(recCell.event.leftGeneIndex, this->getSpeciesLeft(sp), c, commits,
-              check);
-    btDescend(recCell.event.rightGeneIndex, this->getSpeciesRight(sp), c,
-              commits, check);
-    return;
-  case ReconciliationEventType::EVENT_D:
-    // duplication within the branch (below the WGD): children stay resolved
-    btR(recCell.event.leftGeneIndex, sp, c, commits, check);
-    btR(recCell.event.rightGeneIndex, sp, c, commits, check);
-    return;
-  case ReconciliationEventType::EVENT_T:
-    // the kept copy (leftGeneIndex) continues here; the transferred copy
-    // (rightGeneIndex) lands resolved within the destination branch, below any
-    // WGD there -> btR (not btDescend) at the destination.
-    btR(recCell.event.leftGeneIndex, sp, c, commits, check);
-    btR(recCell.event.rightGeneIndex, recCell.event.pllDestSpeciesNode, c,
-        commits, check);
-    return;
-  case ReconciliationEventType::EVENT_SL:
-    btDescend(cid, recCell.event.pllDestSpeciesNode, c, commits, check);
-    return;
-  case ReconciliationEventType::EVENT_DL:
-    btR(cid, sp, c, commits, check); // duplication+loss -> resample this cell
-    return;
-  case ReconciliationEventType::EVENT_TL:
-    if (recCell.event.pllDestSpeciesNode == nullptr) {
-      // transferred copy died in the receiver -> the sender lineage continues
-      btR(cid, sp, c, commits, check);
-    } else {
-      // lineage died in the sender -> continues resolved in the destination
-      btR(cid, recCell.event.pllDestSpeciesNode, c, commits, check);
+  while (true) {
+    REAL proba = REAL();
+    if (!computeProbability(cid, sp, c, proba)) {
+      return;
     }
-    return;
-  default:
-    return;
+    ReconciliationCell<REAL> recCell;
+    recCell.maxProba = this->getRandom(proba);
+    REAL tmp = REAL();
+    if (!computeProbability(cid, sp, c, tmp, &recCell)) {
+      return;
+    }
+    switch (recCell.event.type) {
+    case ReconciliationEventType::EVENT_None:
+      return; // observed as a leaf gene
+    case ReconciliationEventType::EVENT_S:
+      btDescend(recCell.event.leftGeneIndex, this->getSpeciesLeft(sp), c,
+                commits, check);
+      btDescend(recCell.event.rightGeneIndex, this->getSpeciesRight(sp), c,
+                commits, check);
+      return;
+    case ReconciliationEventType::EVENT_D:
+      // duplication within the branch (below the WGD): children stay resolved
+      btR(recCell.event.leftGeneIndex, sp, c, commits, check);
+      btR(recCell.event.rightGeneIndex, sp, c, commits, check);
+      return;
+    case ReconciliationEventType::EVENT_T:
+      // the kept copy (leftGeneIndex) continues here; the transferred copy
+      // (rightGeneIndex) lands resolved within the destination branch, below
+      // any WGD there -> btR (not btDescend) at the destination.
+      btR(recCell.event.leftGeneIndex, sp, c, commits, check);
+      btR(recCell.event.rightGeneIndex, recCell.event.pllDestSpeciesNode, c,
+          commits, check);
+      return;
+    case ReconciliationEventType::EVENT_SL: {
+      // surviving lineage continues in the non-lost child species. This is a
+      // single-lineage tail move (no gene split consumed) that can chain down
+      // the species tree, so loop rather than recurse. At a WGD child the R/U
+      // coin must fire (may switch to the U state) -> delegate to btDescend.
+      corax_rnode_t *child = recCell.event.pllDestSpeciesNode;
+      if (_hasWGD[child->node_index]) {
+        btDescend(cid, child, c, commits, check);
+        return;
+      }
+      sp = child; // stay resolved, continue down the species tree
+      continue;
+    }
+    case ReconciliationEventType::EVENT_DL:
+      continue; // duplication+loss -> nothing observed; resample this cell
+    case ReconciliationEventType::EVENT_TL:
+      // nothing observed; the single surviving lineage continues. If it died in
+      // the sender (pllDestSpeciesNode set) it continues at the destination;
+      // otherwise it continues here. Either way, resample (loop, do not recurse).
+      if (recCell.event.pllDestSpeciesNode != nullptr) {
+        sp = recCell.event.pllDestSpeciesNode;
+      }
+      continue;
+    default:
+      return;
+    }
   }
 }
 
@@ -1159,6 +1177,11 @@ template <class REAL>
 void UndatedDTLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
                                      std::vector<unsigned int> &commits,
                                      bool check) {
+  // Loop on the single-lineage SL-U tail moves (keep one daughter unresolved,
+  // lose the other): like SL in btR these consume no gene split and can chain
+  // down the species tree, so they must not recurse. resolve and speciate-U
+  // consume a split / terminate, so they stay recursive (bounded).
+  while (true) {
   auto e = sp->node_index;
   auto ec = e * _gammaCatNumber + c;
   double r = _resolutionProbs[e];
@@ -1257,8 +1280,10 @@ void UndatedDTLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
   scale(sl1);
   acc = acc + sl1;
   if (acc > toSample) {
-    btU(cid, this->getSpeciesLeft(sp), c, commits, check); // keep f, lose g
-    return;
+    sp = this->getSpeciesLeft(sp); // keep f, lose g (unresolved): loop, no recurse
+    continue;
   }
-  btU(cid, this->getSpeciesRight(sp), c, commits, check); // keep g, lose f
+  sp = this->getSpeciesRight(sp); // keep g, lose f (unresolved): loop, no recurse
+  continue;
+  } // end while(true)
 }
