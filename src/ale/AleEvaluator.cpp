@@ -1,3 +1,4 @@
+#include <functional>
 #include "AleOptimizer.hpp"
 
 #include <algorithm>
@@ -422,11 +423,33 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
       }
       return s;
     };
-    auto logQ = [&](const Parameters &p) {
+    auto logQ = [&]() {
       for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
-        double s = p[j];
-        Logger::info << " q[node " << _wgdNodes[j] << "]=" << s / (1.0 + s);
+        Logger::info << " q[node " << _wgdNodes[j] << "]=" << _wgdQ[j];
       }
+    };
+    // Robust 1-D refinement (golden-section) of a single retention/resolution
+    // parameter in [lo, hi]. The retention likelihood is unimodal in q (and in
+    // r) but very flat near the q->1 boundary, where the gradient method in the
+    // s=q/(1+s) chart under-climbs and stalls (e.g. at q=2/3, s=2). Golden-
+    // section finds the true maximum regardless of the gradient scaling.
+    // eval(x) sets the parameter on the model and returns the joint lnL.
+    auto goldenRefine = [](const std::function<double(double)> &eval, double lo,
+                           double hi, int iters) -> double {
+      const double gr = 0.6180339887498949;
+      double a = lo, b = hi;
+      double c = b - gr * (b - a), d = a + gr * (b - a);
+      double fc = eval(c), fd = eval(d);
+      for (int it = 0; it < iters; ++it) {
+        if (fc > fd) {
+          b = d; d = c; fd = fc; c = b - gr * (b - a); fc = eval(c);
+        } else {
+          a = c; c = d; fc = fd; d = a + gr * (b - a); fd = eval(d);
+        }
+      }
+      double xb = (fc > fd) ? c : d;
+      eval(xb); // leave the model at the best value
+      return xb;
     };
 
     // (1) AORe optimum: WGD retentions only, with r = 1 (the nested null).
@@ -435,19 +458,30 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
     WGDRetentionOptimizer aoreFun(*this, _wgdNodes, false);
     ParallelContext::barrier();
     auto bestA = DTLOptimizer::optimizeParameters(aoreFun, startA, settings);
-    aoreFun.setParameters(bestA); // applies AORe q-hat (also updates _wgdQ)
+    aoreFun.setParameters(bestA); // applies the gradient AORe q-hat (-> _wgdQ)
+    // Golden-section refinement of each retention (r=1): the gradient stalls on
+    // the flat high-q tail (in s-space), so refine in q-space directly. Done in
+    // the thorough pass only (the light pass just warm-starts it).
+    if (thorough) {
+      for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+        auto node = _wgdNodes[j];
+        goldenRefine(
+            [&](double q) { setWGD(node, q); return computeLikelihood(); }, 0.0,
+            0.999, 16);
+      }
+    }
     double llAore = computeLikelihood();
+    std::vector<double> aoreQ = _wgdQ; // refined AORe retentions (for revert)
 
     if (!_optimizeResolution) {
       ll = llAore;
       Logger::timed << "[Species search]   After WGD retention opt, ll=" << ll;
-      logQ(bestA);
+      logQ();
       Logger::info << std::endl;
     } else {
       // (2) LORe optimum: retentions + a global resolution r, seeded at the
-      //     AORe q-hat and r = 0.9 (near-AORe). r = 1 is unreachable in the
-      //     s/(1+s) chart, so we keep whichever of AORe / LORe is better; the
-      //     reported LORe likelihood can never fall below AORe (nested models).
+      //     refined AORe q-hat and r = 0.9 (near-AORe). r = 1 is unreachable in
+      //     the s/(1+s) chart, so we keep whichever of AORe / LORe is better.
       std::vector<double> startL = startQ(); // = AORe q-hat warm start
       startL.push_back(0.9 / (1.0 - 0.9));   // r = 0.9
       setResolutionProb(0.9);
@@ -456,22 +490,37 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
       ParallelContext::barrier();
       auto bestL = DTLOptimizer::optimizeParameters(loreFun, startLore, settings);
       loreFun.setParameters(bestL);
+      // Coordinate-wise golden-section refinement of the retentions and r.
+      if (thorough) {
+        for (int sweep = 0; sweep < 2; ++sweep) {
+          for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+            auto node = _wgdNodes[j];
+            goldenRefine(
+                [&](double q) { setWGD(node, q); return computeLikelihood(); },
+                0.0, 0.999, 16);
+          }
+          goldenRefine(
+              [&](double r) { setResolutionProb(r); return computeLikelihood(); },
+              0.0, 0.999, 16);
+        }
+      }
       double llLore = computeLikelihood();
 
       if (llLore >= llAore) {
         ll = llLore; // delayed resolution improves the fit -> keep LORe
-        double sr = bestL[_wgdNodes.size()];
         Logger::timed << "[Species search]   After WGD+LORe opt, ll=" << ll;
-        logQ(bestL);
-        Logger::info << " r=" << sr / (1.0 + sr) << std::endl;
+        logQ();
+        Logger::info << " r=" << getResolutionProb() << std::endl;
       } else {
-        // LORe optimizer could not beat AORe -> revert to r = 1 (AORe).
-        aoreFun.setParameters(bestA);
+        // LORe could not beat AORe -> revert to the refined AORe q-hat, r = 1.
+        for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+          setWGD(_wgdNodes[j], aoreQ[j]);
+        }
         setResolutionProb(1.0);
         ll = computeLikelihood();
         Logger::timed << "[Species search]   After WGD+LORe opt, ll=" << ll
                       << " (LORe did not improve; reverted to r=1)";
-        logQ(bestA);
+        logQ();
         Logger::info << " r=1" << std::endl;
       }
     }
