@@ -57,13 +57,15 @@ public:
   // STEP 5.2 consistency (sampled-term weights sum to the inside CLV) at every
   // U cell and at the WGD R-vs-U coin.
   void sampleResolutionCommits(unsigned int samples,
-                               std::vector<double> &commitCounts, bool check);
+                               std::vector<double> &commitCounts,
+                               std::vector<double> &tetraCounts, bool check);
 
   // Interface override (used by the reconciliation pipeline): no consistency
   // check, current CLVs assumed.
   void sampleResolutionCommits(unsigned int samples,
-                               std::vector<double> &commitCounts) override {
-    sampleResolutionCommits(samples, commitCounts, false);
+                               std::vector<double> &commitCounts,
+                               std::vector<double> &tetraCounts) override {
+    sampleResolutionCommits(samples, commitCounts, tetraCounts, false);
   }
 
 private:
@@ -87,6 +89,10 @@ private:
   std::vector<double> _OP; // Origination probability, per species branch
   std::vector<REAL> _uE;   // Extinction probability, per species branch
   OriginationStrategy _originationStrategy;
+  // Leaf species at which a U (unresolved/tetrasomic) lineage reaches an extant
+  // tip without committing -> still tetrasomic today. Filled by btU, read+cleared
+  // per sample in sampleResolutionCommits (parallel to the resolved `commits`).
+  std::vector<unsigned int> _tetra;
 
   // Element e of the gene clade's DLCLV stores the probability of the clade,
   // given the clade is mapped to the species branch e.
@@ -671,8 +677,10 @@ UndatedDLMultiModel<REAL>::sampleOriginationR(unsigned int &category) {
 
 template <class REAL>
 void UndatedDLMultiModel<REAL>::sampleResolutionCommits(
-    unsigned int samples, std::vector<double> &commitCounts, bool check) {
+    unsigned int samples, std::vector<double> &commitCounts,
+    std::vector<double> &tetraCounts, bool check) {
   commitCounts.assign(this->getAllSpeciesNodeNumber(), 0.0);
+  tetraCounts.assign(this->getAllSpeciesNodeNumber(), 0.0);
   auto rootCID = this->_ccp.getCladesNumber() - 1;
   for (unsigned int s = 0; s < samples; ++s) {
     unsigned int cat = 0;
@@ -680,9 +688,13 @@ void UndatedDLMultiModel<REAL>::sampleResolutionCommits(
     // A lineage that ORIGINATES anywhere starts resolved (the inside root term
     // uses raw _dlclvs, not the WGD-transformed _dlclvsTop).
     std::vector<unsigned int> commits;
+    _tetra.clear();
     btR(rootCID, origin, cat, commits, check);
     for (auto b : commits) {
       commitCounts[b] += 1.0;
+    }
+    for (auto b : _tetra) {
+      tetraCounts[b] += 1.0; // leaf lineages still tetrasomic at the tip
     }
   }
 }
@@ -838,6 +850,7 @@ void UndatedDLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
     return;
   }
   if (isLeaf) {
+    _tetra.push_back(sp->node_index); // U lineage survives to an extant tip unresolved
     return; // (1-r) R term: unresolved locus observed as a single gene
   }
   // internal: speciate-U (both orderings per split), then SL-U

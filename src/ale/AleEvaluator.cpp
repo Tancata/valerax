@@ -586,11 +586,12 @@ void AleEvaluator::onSpeciesTreeChange(
 }
 
 void AleEvaluator::sampleFamilyResolutionCommits(
-    unsigned int i, unsigned int samples, std::vector<double> &commitCounts) {
+    unsigned int i, unsigned int samples, std::vector<double> &commitCounts,
+    std::vector<double> &tetraCounts) {
   assert(i < getLocalFamilyNumber());
   // ensure the family's CLVs reflect the current (fitted) rates and r
   computeFamilyLikelihood(i);
-  getEvaluation(i).sampleResolutionCommits(samples, commitCounts);
+  getEvaluation(i).sampleResolutionCommits(samples, commitCounts, tetraCounts);
 }
 
 void AleEvaluator::sampleFamilyScenarios(

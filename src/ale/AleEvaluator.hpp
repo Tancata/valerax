@@ -173,7 +173,8 @@ public:
    *  Empty for models / families without a WGD. CLVs are (re)computed first.
    */
   void sampleFamilyResolutionCommits(unsigned int i, unsigned int samples,
-                                     std::vector<double> &commitCounts);
+                                     std::vector<double> &commitCounts,
+                                     std::vector<double> &tetraCounts);
 
   /**
    *  Sample reconciliations and return the HGT frequencies and

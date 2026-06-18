@@ -65,10 +65,12 @@ public:
   // via a U-aware backtrace, accumulating per species branch the expected
   // number of U->R commit (ohnolog-divergence) events. CLVs must be current.
   void sampleResolutionCommits(unsigned int samples,
-                               std::vector<double> &commitCounts, bool check);
+                               std::vector<double> &commitCounts,
+                               std::vector<double> &tetraCounts, bool check);
   void sampleResolutionCommits(unsigned int samples,
-                               std::vector<double> &commitCounts) override {
-    sampleResolutionCommits(samples, commitCounts, false);
+                               std::vector<double> &commitCounts,
+                               std::vector<double> &tetraCounts) override {
+    sampleResolutionCommits(samples, commitCounts, tetraCounts, false);
   }
 
 private:
@@ -113,6 +115,11 @@ private:
   // runaway, whether an iterative loop or an inter-function re-entry.
   size_t _btSteps = 0;
   static const size_t kBtStepCap = 50000;
+  // Leaf species at which a U (unresolved/tetrasomic) lineage reaches an extant
+  // tip without ever committing -> still tetrasomic in that species today.
+  // Filled by btU during a resolution-commit sample; read+cleared per sample in
+  // sampleResolutionCommits (parallel to the resolved-state `commits`).
+  std::vector<unsigned int> _tetra;
   OriginationStrategy _originationStrategy;
   TransferConstaint _transferConstraint;
   // Forbidden transfers, per species branch
@@ -1079,8 +1086,10 @@ UndatedDTLMultiModel<REAL>::sampleOriginationR(unsigned int &category) {
 
 template <class REAL>
 void UndatedDTLMultiModel<REAL>::sampleResolutionCommits(
-    unsigned int samples, std::vector<double> &commitCounts, bool check) {
+    unsigned int samples, std::vector<double> &commitCounts,
+    std::vector<double> &tetraCounts, bool check) {
   commitCounts.assign(this->getAllSpeciesNodeNumber(), 0.0);
+  tetraCounts.assign(this->getAllSpeciesNodeNumber(), 0.0);
   auto rootCID = this->_ccp.getCladesNumber() - 1;
   for (unsigned int s = 0; s < samples; ++s) {
     unsigned int cat = 0;
@@ -1088,10 +1097,14 @@ void UndatedDTLMultiModel<REAL>::sampleResolutionCommits(
     // A lineage that ORIGINATES anywhere starts resolved (the root term uses
     // raw _uq, not the WGD-transformed _uqTop).
     std::vector<unsigned int> commits;
+    _tetra.clear();
     _btSteps = 0; // reset the hard per-sample backstop
     btR(rootCID, origin, cat, commits, check);
     for (auto b : commits) {
       commitCounts[b] += 1.0;
+    }
+    for (auto b : _tetra) {
+      tetraCounts[b] += 1.0; // leaf lineages still tetrasomic at the tip
     }
   }
 }
@@ -1324,6 +1337,7 @@ void UndatedDTLMultiModel<REAL>::btU(CID cid, corax_rnode_t *sp, unsigned int c,
     return;
   }
   if (isLeaf) {
+    _tetra.push_back(e); // U lineage survives to an extant tip unresolved
     return; // (1-r) R term: unresolved locus observed as a single gene
   }
   // internal: speciate-U (both orderings per split), then SL-U

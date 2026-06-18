@@ -454,6 +454,10 @@ void AleOptimizer::reconcile(unsigned int samples) {
                       !recInfo.pruneSpeciesTree && !recInfo.memorySavings;
   std::vector<double> totalResolution(getSpeciesTree().getTree().getNodeNumber(),
                                       0.0);
+  // Per-(leaf)-species expected number of ohnolog pairs still TETRASOMIC at the
+  // tips (a U lineage that reaches an extant species without ever committing).
+  std::vector<double> totalTetrasomy(getSpeciesTree().getTree().getNodeNumber(),
+                                     0.0);
   // The gene-tree event backbone (D/T/L/copies + sampled trees) is sampled at
   // r=1 (AORe-resolved). Under LORe (r<1) the WGD-doubling / U-state mass would
   // otherwise leak into the *U-unaware* scenario sampler as a spray of spurious
@@ -560,19 +564,28 @@ void AleOptimizer::reconcile(unsigned int samples) {
     }
     for (unsigned int i = 0; i < localFamilies.size(); ++i) {
       std::vector<double> famCommits;
-      _evaluator->sampleFamilyResolutionCommits(i, samples, famCommits);
+      std::vector<double> famTetra;
+      _evaluator->sampleFamilyResolutionCommits(i, samples, famCommits,
+                                                famTetra);
       auto famResFile = FileSystem::joinPaths(
           summariesDir, localFamilies[i].name + "_meanResolutionCounts.txt");
       ParallelOfstream famOs(famResFile, false);
-      famOs << "#species_branch\texpected_WGD_resolution_events" << std::endl;
+      famOs << "#species_branch\texpected_WGD_resolution_events"
+               "\texpected_tetrasomic_at_tip"
+            << std::endl;
       for (auto node : getSpeciesTree().getTree().getNodes()) {
         double expected =
             famCommits.empty()
                 ? 0.0
                 : famCommits[node->node_index] / static_cast<double>(samples);
+        double tetra =
+            famTetra.empty()
+                ? 0.0
+                : famTetra[node->node_index] / static_cast<double>(samples);
         totalResolution[node->node_index] += expected;
-        famOs << (node->label ? node->label : "NA") << "\t" << expected
-              << std::endl;
+        totalTetrasomy[node->node_index] += tetra;
+        famOs << (node->label ? node->label : "NA") << "\t" << expected << "\t"
+              << tetra << std::endl;
       }
       famOs.close();
     }
@@ -610,6 +623,21 @@ void AleOptimizer::reconcile(unsigned int samples) {
     os.close();
     Logger::timed << "[Reconciliation] WGD resolution-branch profile: "
                   << totalResolutionFile << std::endl;
+    // export the total per-tip tetrasomy profile: the expected number of ohnolog
+    // pairs that reach an extant species still unresolved (tetrasomic today),
+    // summed over all gene families, under the fitted r.
+    ParallelContext::sumVectorDouble(totalTetrasomy);
+    auto totalTetraFile =
+        FileSystem::joinPaths(recDir, "totalSpeciesTetrasomyCounts.txt");
+    ParallelOfstream tos(totalTetraFile, true); // master rank only
+    tos << "#species_branch\texpected_tetrasomic_pairs" << std::endl;
+    for (auto node : getSpeciesTree().getTree().getNodes()) {
+      tos << (node->label ? node->label : "NA") << "\t"
+          << totalTetrasomy[node->node_index] << std::endl;
+    }
+    tos.close();
+    Logger::timed << "[Reconciliation] tetrasomy (still-unresolved) profile: "
+                  << totalTetraFile << std::endl;
     // Per-WGD summary: declared branch, fitted retention q and resolution r, and
     // the expected number of rediploidization commits within the WGD's subtree.
     // This makes the WGD location self-contained even under LORe (where the
@@ -619,19 +647,22 @@ void AleOptimizer::reconcile(unsigned int samples) {
     auto wgdSummaryFile = FileSystem::joinPaths(recDir, "wgdSummary.txt");
     ParallelOfstream wos(wgdSummaryFile, true);
     wos << "#wgd_branch\tnode_index\tq_retention\tr_resolution"
-        << "\texpected_resolution_commits" << std::endl;
+        << "\texpected_resolution_commits\texpected_tetrasomic_pairs"
+        << std::endl;
     for (auto w : _evaluator->getWGDNodes()) {
       double subtreeCommits = 0.0;
+      double subtreeTetra = 0.0;
       for (auto node : stree.getNodes()) {
         auto e = node->node_index;
         if (e == w || stree.isAncestorOf(w, e)) {
           subtreeCommits += totalResolution[e];
+          subtreeTetra += totalTetrasomy[e];
         }
       }
       auto *wnode = stree.getNode(w);
       wos << (wnode->label ? wnode->label : "NA") << "\t" << w << "\t"
           << _evaluator->getWGDRetention(w) << "\t" << rHat << "\t"
-          << subtreeCommits << std::endl;
+          << subtreeCommits << "\t" << subtreeTetra << std::endl;
     }
     wos.close();
     Logger::timed << "[Reconciliation] WGD summary (branch, q, r, commits): "

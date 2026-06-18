@@ -53,8 +53,10 @@ public:
   // the number of U->R commit (WGD resolution) events. CLVs must be current.
   // No-op (empty output) for models without LORe. See WGD_LORE_marginal.md.
   virtual void sampleResolutionCommits(unsigned int /*samples*/,
-                                       std::vector<double> &commitCounts) {
+                                       std::vector<double> &commitCounts,
+                                       std::vector<double> &tetraCounts) {
     commitCounts.clear();
+    tetraCounts.clear();
   }
 
   virtual double computeLogLikelihood() = 0;
