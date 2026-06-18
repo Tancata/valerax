@@ -454,6 +454,19 @@ void AleOptimizer::reconcile(unsigned int samples) {
                       !recInfo.pruneSpeciesTree && !recInfo.memorySavings;
   std::vector<double> totalResolution(getSpeciesTree().getTree().getNodeNumber(),
                                       0.0);
+  // The gene-tree event backbone (D/T/L/copies + sampled trees) is sampled at
+  // r=1 (AORe-resolved). Under LORe (r<1) the WGD-doubling / U-state mass would
+  // otherwise leak into the *U-unaware* scenario sampler as a spray of spurious
+  // transfers around the WGD branch (the model treats the U-state as
+  // vertical-only, transfers acting on resolved lineages, but the scenario
+  // backtrace does not). The LORe resolution profile is sampled separately,
+  // below, at the fitted r (PASS B). sampleReconciliations() calls updateCLVs(),
+  // so setting r here is enough to make the backbone use the resolved transform.
+  double rFitted = _evaluator->getResolutionProb();
+  bool wgdActiveLORe = !_evaluator->getWGDNodes().empty() && rFitted < 1.0;
+  if (wgdActiveLORe) {
+    _evaluator->setResolutionProb(1.0);
+  }
   for (unsigned int i = 0; i < localFamilies.size(); ++i) {
     std::vector<std::string> perSpeciesEventCountsFiles;
     std::vector<std::string> transferFiles;
@@ -471,26 +484,7 @@ void AleOptimizer::reconcile(unsigned int samples) {
     // (or no) gene-tree samples. We iterate over what was sampled; the LORe
     // resolution profile below is computed by a separate, robust backtrace.
     unsigned int sampledScenarios = scenarios.size();
-    // LORe: sample the per-branch WGD resolution-event (U->R commit) profile for
-    // this family under the fitted r, and write the per-family expected counts.
-    if (doResolution) {
-      std::vector<double> famCommits;
-      _evaluator->sampleFamilyResolutionCommits(i, samples, famCommits);
-      auto famResFile = FileSystem::joinPaths(
-          summariesDir, localFamilies[i].name + "_meanResolutionCounts.txt");
-      ParallelOfstream famOs(famResFile, false);
-      famOs << "#species_branch\texpected_WGD_resolution_events" << std::endl;
-      for (auto node : getSpeciesTree().getTree().getNodes()) {
-        double expected =
-            famCommits.empty()
-                ? 0.0
-                : famCommits[node->node_index] / static_cast<double>(samples);
-        totalResolution[node->node_index] += expected;
-        famOs << (node->label ? node->label : "NA") << "\t" << expected
-              << std::endl;
-      }
-      famOs.close();
-    }
+    // (LORe resolution profile is sampled in PASS B below, at the fitted r.)
     // writing in the reconciliations/all/ dir
     auto geneTreesPath = FileSystem::joinPaths(
         allRecDir, localFamilies[i].name + "_samples.newick");
@@ -553,6 +547,38 @@ void AleOptimizer::reconcile(unsigned int samples) {
   }
   ParallelContext::barrier();
   ParallelContext::makeRandConsistent();
+  // Restore the fitted r (the event backbone above was sampled at r=1).
+  if (wgdActiveLORe) {
+    _evaluator->setResolutionProb(rFitted);
+  }
+  // PASS B: LORe resolution-branch profile, sampled at the fitted r by the
+  // U-aware backtrace. sampleResolutionCommits() does NOT refresh the CLVs, so
+  // rebuild them at the fitted r first (the backbone pass left them at r=1).
+  if (doResolution) {
+    if (wgdActiveLORe) {
+      _evaluator->computeLikelihood();
+    }
+    for (unsigned int i = 0; i < localFamilies.size(); ++i) {
+      std::vector<double> famCommits;
+      _evaluator->sampleFamilyResolutionCommits(i, samples, famCommits);
+      auto famResFile = FileSystem::joinPaths(
+          summariesDir, localFamilies[i].name + "_meanResolutionCounts.txt");
+      ParallelOfstream famOs(famResFile, false);
+      famOs << "#species_branch\texpected_WGD_resolution_events" << std::endl;
+      for (auto node : getSpeciesTree().getTree().getNodes()) {
+        double expected =
+            famCommits.empty()
+                ? 0.0
+                : famCommits[node->node_index] / static_cast<double>(samples);
+        totalResolution[node->node_index] += expected;
+        famOs << (node->label ? node->label : "NA") << "\t" << expected
+              << std::endl;
+      }
+      famOs.close();
+    }
+    ParallelContext::barrier();
+    ParallelContext::makeRandConsistent();
+  }
   Logger::timed << "[Reconciliation] Exporting reconciliation summaries"
                 << std::endl;
   // export total per-branch event counts
