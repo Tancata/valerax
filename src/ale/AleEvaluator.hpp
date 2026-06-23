@@ -132,9 +132,43 @@ public:
   }
 
   /**
-   *  The current (fitted) global LORe resolution probability r (1.0 == AORe).
+   *  Legacy scalar accessor: now returns the LORe resolution r of the first
+   *  resolvable (internal-branch) WGD, or 1.0 if there is none. Prefer the
+   *  per-event getWGDResolution() / getWGDResolvableMask() below.
    */
   double getResolutionProb() const { return _resolutionProb; }
+
+  /**
+   *  Per-event LORe resolution r of the WGD on branch `speciesNode` (1.0 if
+   *  none, or if pinned to AORe because the WGD sits on a terminal branch).
+   */
+  double getWGDResolution(unsigned int speciesNode) const {
+    auto it = std::find(_wgdNodes.begin(), _wgdNodes.end(), speciesNode);
+    return (it == _wgdNodes.end())
+               ? 1.0
+               : _wgdResolution[std::distance(_wgdNodes.begin(), it)];
+  }
+
+  /**
+   *  Per declared WGD (aligned with getWGDNodes()): is its r a *free* parameter?
+   *  False for terminal-branch WGDs (r pinned to AORe). Valid after
+   *  buildWGDStructure().
+   */
+  const std::vector<char> &getWGDResolvableMask() const { return _wgdResolvable; }
+
+  /**
+   *  Set per-event resolution probs (aligned with getWGDNodes()). Each WGD
+   *  paints its own subtree; branches below no WGD stay at r=1. Requires
+   *  disjoint WGD subtrees (enforced in buildWGDStructure under --lore).
+   */
+  void setWGDResolutions(const std::vector<double> &rPerWGD);
+
+  /**
+   *  Build the per-WGD subtree branch sets and the resolvable mask (terminal
+   *  WGDs => r pinned to AORe). Under --lore with more than one WGD, abort if
+   *  the WGD subtrees overlap (nested WGDs => per-event r is unidentifiable).
+   */
+  void buildWGDStructure();
 
   /**
    *  Set the (global, phase-1) LORe resolution probability r in [0,1] and
@@ -265,8 +299,15 @@ private:
   // start for the retention optimizer)
   std::vector<unsigned int> _wgdNodes;
   std::vector<double> _wgdQ;
-  // LORe (delayed rediploidization): global resolution probability r and
-  // whether it is optimised jointly with the WGD retentions
+  // LORe (delayed rediploidization): per-event resolution probability r (one per
+  // declared WGD, aligned with _wgdNodes; default 1.0 == AORe), the species
+  // branches each WGD governs (its subtree), and per WGD whether r is a free
+  // parameter (false for terminal-branch WGDs: r pinned to AORe). Built lazily
+  // by buildWGDStructure(). _resolutionProb is the legacy scalar (r of the first
+  // resolvable WGD).
+  std::vector<double> _wgdResolution;
+  std::vector<std::vector<unsigned int>> _wgdSubtreeBranches;
+  std::vector<char> _wgdResolvable;
   double _resolutionProb = 1.0;
   bool _optimizeResolution = false;
   std::vector<int> _highPrecisions;

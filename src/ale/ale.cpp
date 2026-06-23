@@ -544,13 +544,15 @@ void declareWGDs(const AleArguments &args, AleOptimizer &optimizer) {
                   << (node->label ? node->label : "<internal>")
                   << "), starting retention q=" << wgd.q0 << std::endl;
   }
-  // LORe: enable joint estimation of the global resolution probability r
-  // (start near-AORe at r=0.9). r=1 is the WHALE/AORe limit.
+  // LORe: enable joint estimation of a per-event resolution probability r (one
+  // per declared WGD with an internal-branch subtree; start near-AORe at r=0.9).
+  // r=1 is the WHALE/AORe limit; terminal-branch WGDs keep r pinned to 1.
   if (args.lore) {
     evaluator.setResolutionProb(0.9);
     evaluator.enableResolutionOptimization(true);
-    Logger::timed << "LORe enabled: will estimate a global resolution "
-                  << "probability r (starting r=0.9)" << std::endl;
+    Logger::timed << "LORe enabled: will estimate a per-event resolution "
+                  << "probability r per declared WGD (starting r=0.9)"
+                  << std::endl;
   }
 }
 

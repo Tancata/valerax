@@ -78,11 +78,12 @@ int main(int argc, char **argv) {
 
   const unsigned int N = 40000;
   std::vector<double> commits;
+  std::vector<double> tetra;
 
   // --- STEP 5.1: r = 1 => all commits on the WGD branch ---
   model.setResolutionProb(1.0);
   model.computeLogLikelihood();
-  model.sampleResolutionCommits(N, commits, /*check=*/true);
+  model.sampleResolutionCommits(N, commits, tetra, /*check=*/true);
   double tot1 = 0.0, onW = 0.0;
   for (unsigned int e = 0; e < commits.size(); ++e) {
     tot1 += commits[e];
@@ -112,7 +113,7 @@ int main(int argc, char **argv) {
   // --- STEP 5.3/5.4: marginal under the fitted r ---
   model.setResolutionProb(bestR);
   model.computeLogLikelihood();
-  model.sampleResolutionCommits(N, commits, /*check=*/true);
+  model.sampleResolutionCommits(N, commits, tetra, /*check=*/true);
   double tot = 0.0;
   for (double v : commits) {
     tot += v;

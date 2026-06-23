@@ -49,6 +49,11 @@ public:
   // immediate-resolution (WHALE/AORe) WGD model. No-op for models without LORe.
   virtual void setResolutionProb(double /*r*/) {}
 
+  // Set a *per-species-branch* LORe resolution vector (index == species
+  // node_index). Used for per-event r: each declared WGD paints its own subtree
+  // with its own r, every other branch stays at r=1 (AORe). No-op without LORe.
+  virtual void setResolutionProbVector(const std::vector<double> & /*perBranchR*/) {}
+
   // Sample `samples` resolution histories and accumulate, per species branch,
   // the number of U->R commit (WGD resolution) events. CLVs must be current.
   // No-op (empty output) for models without LORe. See WGD_LORE_marginal.md.

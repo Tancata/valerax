@@ -466,8 +466,19 @@ void AleOptimizer::reconcile(unsigned int samples) {
   // backtrace does not). The LORe resolution profile is sampled separately,
   // below, at the fitted r (PASS B). sampleReconciliations() calls updateCLVs(),
   // so setting r here is enough to make the backbone use the resolved transform.
-  double rFitted = _evaluator->getResolutionProb();
-  bool wgdActiveLORe = !_evaluator->getWGDNodes().empty() && rFitted < 1.0;
+  // Save the fitted per-event r (one per declared WGD) so we can restore it
+  // after sampling the backbone at r=1. LORe is active if any WGD has r<1.
+  std::vector<double> fittedR;
+  for (auto w : _evaluator->getWGDNodes()) {
+    fittedR.push_back(_evaluator->getWGDResolution(w));
+  }
+  bool wgdActiveLORe = false;
+  for (auto r : fittedR) {
+    if (r < 1.0) {
+      wgdActiveLORe = true;
+      break;
+    }
+  }
   if (wgdActiveLORe) {
     _evaluator->setResolutionProb(1.0);
   }
@@ -551,9 +562,10 @@ void AleOptimizer::reconcile(unsigned int samples) {
   }
   ParallelContext::barrier();
   ParallelContext::makeRandConsistent();
-  // Restore the fitted r (the event backbone above was sampled at r=1).
+  // Restore the fitted per-event r (the event backbone above was sampled at
+  // r=1). setWGDResolutions repaints each WGD's subtree with its own r.
   if (wgdActiveLORe) {
-    _evaluator->setResolutionProb(rFitted);
+    _evaluator->setWGDResolutions(fittedR);
   }
   // PASS B: LORe resolution-branch profile, sampled at the fitted r by the
   // U-aware backtrace. sampleResolutionCommits() does NOT refresh the CLVs, so
@@ -643,7 +655,6 @@ void AleOptimizer::reconcile(unsigned int samples) {
     // This makes the WGD location self-contained even under LORe (where the
     // resolution profile above points at descendant branches, not the WGD one).
     auto &stree = getSpeciesTree().getTree();
-    double rHat = _evaluator->getResolutionProb();
     auto wgdSummaryFile = FileSystem::joinPaths(recDir, "wgdSummary.txt");
     ParallelOfstream wos(wgdSummaryFile, true);
     wos << "#wgd_branch\tnode_index\tq_retention\tr_resolution"
@@ -661,7 +672,8 @@ void AleOptimizer::reconcile(unsigned int samples) {
       }
       auto *wnode = stree.getNode(w);
       wos << (wnode->label ? wnode->label : "NA") << "\t" << w << "\t"
-          << _evaluator->getWGDRetention(w) << "\t" << rHat << "\t"
+          << _evaluator->getWGDRetention(w) << "\t"
+          << _evaluator->getWGDResolution(w) << "\t" // per-event r (was rHat)
           << subtreeCommits << "\t" << subtreeTetra << std::endl;
     }
     wos.close();

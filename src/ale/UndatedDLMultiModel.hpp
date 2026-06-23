@@ -38,6 +38,19 @@ public:
     this->resetCache();
   }
 
+  // Per-event r: assign a full per-branch resolution vector at once (index ==
+  // species node_index). Defensive on size: branches not covered stay at r=1.
+  // One cache reset per call.
+  void setResolutionProbVector(const std::vector<double> &perBranchR) override {
+    std::fill(_resolutionProbs.begin(), _resolutionProbs.end(), 1.0);
+    const size_t n = std::min(perBranchR.size(), _resolutionProbs.size());
+    for (size_t e = 0; e < n; ++e) {
+      _resolutionProbs[e] = perBranchR[e];
+    }
+    this->invalidateAllSpeciesNodes();
+    this->resetCache();
+  }
+
   // Set the resolution probability on a single species branch e (phase 1.5:
   // branch-specific r, used to place / recover lineage-specific resolution).
   void setResolutionProbBranch(unsigned int e, double r) {

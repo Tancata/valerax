@@ -215,6 +215,7 @@ void AleEvaluator::setWGD(unsigned int speciesNode, double q) {
   if (it == _wgdNodes.end()) {
     _wgdNodes.push_back(speciesNode);
     _wgdQ.push_back(q);
+    _wgdResolution.push_back(1.0); // keep the parallel vectors aligned
   } else {
     _wgdQ[std::distance(_wgdNodes.begin(), it)] = q;
   }
@@ -225,8 +226,73 @@ void AleEvaluator::setWGD(unsigned int speciesNode, double q) {
 
 void AleEvaluator::setResolutionProb(double r) {
   _resolutionProb = r;
+  // keep the per-event r state consistent on the AORe baseline / revert paths
+  std::fill(_wgdResolution.begin(), _wgdResolution.end(), r);
   for (auto &evaluation : _evaluations) {
     evaluation->setResolutionProb(r);
+  }
+}
+
+void AleEvaluator::buildWGDStructure() {
+  auto &tree = _speciesTree.getTree(); // non-const: isAncestorOf is non-const
+  const unsigned int n = _wgdNodes.size();
+  _wgdSubtreeBranches.assign(n, {});
+  _wgdResolvable.assign(n, 0);
+  for (unsigned int j = 0; j < n; ++j) {
+    const unsigned int w = _wgdNodes[j];
+    for (auto node : tree.getNodes()) {
+      const unsigned int e = node->node_index;
+      if (e == w || tree.isAncestorOf(w, e)) {
+        _wgdSubtreeBranches[j].push_back(e);
+      }
+    }
+    // internal WGD (subtree has descendants) => r is a free parameter; a
+    // terminal WGD governs only its own branch => r unidentifiable, pinned.
+    _wgdResolvable[j] = (_wgdSubtreeBranches[j].size() > 1) ? 1 : 0;
+  }
+  if (_optimizeResolution && n > 1) {
+    std::vector<int> owner(tree.getNodeNumber(), -1); // branch -> WGD idx, -1=none
+    for (unsigned int j = 0; j < n; ++j) {
+      for (auto e : _wgdSubtreeBranches[j]) {
+        if (owner[e] >= 0) {
+          Logger::error
+              << "Error: --lore with multiple --wgd requires DISJOINT WGD "
+                 "subtrees. "
+              << "Per-event resolution r is only identifiable when no species "
+                 "branch "
+              << "lies below two declared WGDs, but the WGDs at nodes "
+              << _wgdNodes[owner[e]] << " and " << _wgdNodes[j]
+              << " are nested (branch " << e << " is below both). "
+              << "Re-run with disjoint WGDs, or drop --lore (per-event q is "
+                 "still "
+              << "estimated under AORe with nested WGDs)." << std::endl;
+          ParallelContext::abort(1);
+        }
+        owner[e] = static_cast<int>(j);
+      }
+    }
+  }
+}
+
+void AleEvaluator::setWGDResolutions(const std::vector<double> &rPerWGD) {
+  _wgdResolution = rPerWGD;
+  // legacy scalar: first resolvable WGD's r (or 1.0)
+  _resolutionProb = 1.0;
+  for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+    if (j < _wgdResolvable.size() && _wgdResolvable[j]) {
+      _resolutionProb = rPerWGD[j];
+      break;
+    }
+  }
+  // paint a per-branch vector: 1.0 everywhere, then each WGD's subtree with its r
+  std::vector<double> perBranch(_speciesTree.getTree().getNodeNumber(), 1.0);
+  for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+    for (auto e : _wgdSubtreeBranches[j]) {
+      perBranch[e] = rPerWGD[j];
+    }
+  }
+  for (auto &evaluation : _evaluations) {
+    evaluation->setResolutionProbVector(perBranch);
   }
 }
 
@@ -299,23 +365,34 @@ class WGDRetentionOptimizer : public FunctionToOptimize {
 public:
   WGDRetentionOptimizer(AleEvaluator &evaluator,
                         const std::vector<unsigned int> &wgdNodes,
-                        bool optimizeResolution)
+                        bool optimizeResolution,
+                        const std::vector<char> &rFree) // aligned with wgdNodes
       : _evaluator(evaluator), _nodes(wgdNodes),
-        _optimizeResolution(optimizeResolution) {}
+        _optimizeResolution(optimizeResolution), _rFree(rFree) {}
 
-  // Parameter layout: [ s_q for each WGD branch ]  (+ [ s_r ] if LORe).
-  // Each free s >= 0 maps to a probability via p = s / (1 + s), in [0, 1).
+  // Parameter layout: [ s_q[0..n-1] ]  (+ [ s_r ] for each j with _rFree[j], in
+  // node order). Each free s >= 0 maps to a probability via p = s / (1 + s), in
+  // [0, 1). Terminal WGDs are excluded from the r block (their r is pinned to
+  // AORe).
   void setParameters(Parameters &parameters) {
     parameters.ensurePositivity(); // optimizer guarantees s >= 0
-    for (unsigned int j = 0; j < _nodes.size(); ++j) {
+    const unsigned int n = _nodes.size();
+    for (unsigned int j = 0; j < n; ++j) {
       double s = parameters[j];
       double q = s / (1.0 + s); // map s in [0, inf) -> q in [0, 1)
       _evaluator.setWGD(_nodes[j], q);
     }
     if (_optimizeResolution) {
-      double s = parameters[_nodes.size()];
-      double r = s / (1.0 + s); // map s in [0, inf) -> r in [0, 1)
-      _evaluator.setResolutionProb(r);
+      std::vector<double> rVec(n, 1.0);
+      unsigned int k = 0;
+      for (unsigned int j = 0; j < n; ++j) {
+        if (j < _rFree.size() && _rFree[j]) {
+          double s = parameters[n + k];
+          rVec[j] = s / (1.0 + s); // map s in [0, inf) -> r in [0, 1)
+          ++k;
+        }
+      }
+      _evaluator.setWGDResolutions(rVec);
     }
   }
 
@@ -330,6 +407,7 @@ private:
   AleEvaluator &_evaluator;
   std::vector<unsigned int> _nodes;
   bool _optimizeResolution;
+  std::vector<char> _rFree;
 };
 
 double AleEvaluator::optimizeModelRates(bool thorough) {
@@ -395,10 +473,21 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
   // whether any WGD is declared (independent of _optimizeRates, so q can be
   // estimated even with D/L fixed, as the WHALE cross-validation needs).
   if (!_wgdNodes.empty()) {
+    // Build the per-WGD subtree sets and resolvable mask first, so the masks /
+    // subtrees are ready and the disjointness check (under --lore) fires before
+    // any fitting.
+    buildWGDStructure();
+    unsigned int nFreeR = 0;
+    for (auto c : _wgdResolvable) {
+      nFreeR += (c ? 1u : 0u);
+    }
     Logger::timed << "[Species search] Optimizing WGD retention(s) on "
-                  << _wgdNodes.size() << " branch(es)"
-                  << (_optimizeResolution ? " + LORe resolution r" : "")
-                  << ", ll=" << ll << std::endl;
+                  << _wgdNodes.size() << " branch(es)";
+    if (_optimizeResolution) {
+      Logger::info << " + per-event LORe r (" << nFreeR << " free, "
+                   << (_wgdNodes.size() - nFreeR) << " pinned:terminal)";
+    }
+    Logger::info << ", ll=" << ll << std::endl;
     OptimizationSettings settings;
     settings.listeners.push_back(&_optimizer);
     settings.verbose = _optimizeVerbose;
@@ -428,6 +517,14 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
         Logger::info << " q[node " << _wgdNodes[j] << "]=" << _wgdQ[j];
       }
     };
+    auto logR = [&]() {
+      for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+        Logger::info << " r[node " << _wgdNodes[j] << "]=" << _wgdResolution[j];
+        if (j >= _wgdResolvable.size() || !_wgdResolvable[j]) {
+          Logger::info << "(pinned;terminal)";
+        }
+      }
+    };
     // Robust 1-D refinement (golden-section) of a single retention/resolution
     // parameter in [lo, hi]. The retention likelihood is unimodal in q (and in
     // r) but very flat near the q->1 boundary, where the gradient method in the
@@ -455,7 +552,7 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
     // (1) AORe optimum: WGD retentions only, with r = 1 (the nested null).
     setResolutionProb(1.0);
     Parameters startA(startQ());
-    WGDRetentionOptimizer aoreFun(*this, _wgdNodes, false);
+    WGDRetentionOptimizer aoreFun(*this, _wgdNodes, false, {});
     ParallelContext::barrier();
     auto bestA = DTLOptimizer::optimizeParameters(aoreFun, startA, settings);
     aoreFun.setParameters(bestA); // applies the gradient AORe q-hat (-> _wgdQ)
@@ -479,19 +576,41 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
       logQ();
       Logger::info << std::endl;
     } else {
-      // (2) LORe optimum: retentions + a global resolution r, seeded at the
-      //     refined AORe q-hat and r = 0.9 (near-AORe). r = 1 is unreachable in
-      //     the s/(1+s) chart, so we keep whichever of AORe / LORe is better.
-      std::vector<double> startL = startQ(); // = AORe q-hat warm start
-      startL.push_back(0.9 / (1.0 - 0.9));   // r = 0.9
-      setResolutionProb(0.9);
+      // (2) LORe optimum: retentions + a *per-event* resolution r, one free r
+      //     per *resolvable* (internal-branch) WGD, seeded at the refined AORe
+      //     q-hat and r = 0.9 (near-AORe). Terminal-branch WGDs keep r pinned to
+      //     1 (AORe). r = 1 is unreachable in the s/(1+s) chart, so we keep
+      //     whichever of AORe / LORe is better.
+      const std::vector<char> &rFree = _wgdResolvable;
+
+      // start vector: q-hat warm start, then r=0.9 for each resolvable WGD
+      std::vector<double> startL = startQ();
+      for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+        if (rFree[j]) {
+          startL.push_back(0.9 / (1.0 - 0.9)); // r = 0.9
+        }
+      }
+
+      // seed the model: 0.9 on resolvable WGDs, 1.0 (pinned) on terminal ones
+      std::vector<double> r0(_wgdNodes.size(), 1.0);
+      for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+        if (rFree[j]) {
+          r0[j] = 0.9;
+        }
+      }
+      setWGDResolutions(r0);
+
       Parameters startLore(startL);
-      WGDRetentionOptimizer loreFun(*this, _wgdNodes, true);
+      WGDRetentionOptimizer loreFun(*this, _wgdNodes, true, rFree);
       ParallelContext::barrier();
       auto bestL = DTLOptimizer::optimizeParameters(loreFun, startLore, settings);
       loreFun.setParameters(bestL);
-      // Coordinate-wise golden-section refinement of the retentions and r.
+
+      // Coordinate-wise golden-section refinement of the retentions and the
+      // per-event r (thorough only). setWGD changes only q (leaves the per-event
+      // r state intact); the pinned (!rFree[j]) entries of rVec stay 1.0.
       if (thorough) {
+        std::vector<double> rVec = _wgdResolution; // current per-event r (size n)
         for (int sweep = 0; sweep < 2; ++sweep) {
           for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
             auto node = _wgdNodes[j];
@@ -499,9 +618,18 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
                 [&](double q) { setWGD(node, q); return computeLikelihood(); },
                 0.0, 0.999, 16);
           }
-          goldenRefine(
-              [&](double r) { setResolutionProb(r); return computeLikelihood(); },
-              0.0, 0.999, 16);
+          for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+            if (!rFree[j]) {
+              continue;
+            }
+            goldenRefine(
+                [&](double r) {
+                  rVec[j] = r;
+                  setWGDResolutions(rVec);
+                  return computeLikelihood();
+                },
+                0.0, 0.999, 16);
+          }
         }
       }
       double llLore = computeLikelihood();
@@ -510,18 +638,20 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
         ll = llLore; // delayed resolution improves the fit -> keep LORe
         Logger::timed << "[Species search]   After WGD+LORe opt, ll=" << ll;
         logQ();
-        Logger::info << " r=" << getResolutionProb() << std::endl;
+        logR();
+        Logger::info << std::endl;
       } else {
         // LORe could not beat AORe -> revert to the refined AORe q-hat, r = 1.
         for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
           setWGD(_wgdNodes[j], aoreQ[j]);
         }
-        setResolutionProb(1.0);
+        setResolutionProb(1.0); // also fills _wgdResolution with 1.0
         ll = computeLikelihood();
         Logger::timed << "[Species search]   After WGD+LORe opt, ll=" << ll
-                      << " (LORe did not improve; reverted to r=1)";
+                      << " (LORe did not improve; reverted to AORe r=1)";
         logQ();
-        Logger::info << " r=1" << std::endl;
+        logR();
+        Logger::info << std::endl;
       }
     }
   }

@@ -435,9 +435,11 @@ void AleArguments::printHelp() const {
   Logger::info << "\t--wgd <LABEL[,LABEL2][:q0]> (declare a WGD on a terminal "
                << "branch or the branch to the LCA of two taxa; repeatable)"
                << std::endl;
-  Logger::info << "\t--lore (estimate delayed rediploidization: fit a global "
-               << "resolution prob r; requires --wgd and --rec-model UndatedDL "
-               << "or UndatedDTL)"
+  Logger::info << "\t--lore (estimate delayed rediploidization: fit a per-event "
+               << "resolution prob r for each declared WGD (requires the WGD "
+               << "subtrees to be disjoint; a WGD on a terminal branch has its "
+               << "r pinned to 1/AORe); requires --wgd and --rec-model "
+               << "UndatedDL or UndatedDTL)"
                << std::endl;
 
   Logger::info << "Search strategy options:" << std::endl;

@@ -191,14 +191,25 @@ counterparts `EU`, `U`, with `EU = r·E² + (1−r)(…)` and
 them: `transform = (1−q)·R + q·U` (and likewise for extinction). At `r = 1` this is
 **bit-for-bit** the AORe transform (a hard regression gate).
 
-`r` is a **single global parameter, pooled across all families** (not per-family,
-not free per-branch), fitted jointly with `q` by maximum likelihood. Because the
-LORe model *nests* AORe (`r = 1`), the fit is guarded to never score below the
-AORe optimum: with no delayed-resolution signal, `r̂ → 1` and the LRT ties.
+`r` is fitted **per declared WGD** — one `r` per `--wgd`, pooled across all
+families (not per-family, not free per-branch *within* a WGD) — jointly with the
+`q`'s by maximum likelihood. Each WGD paints its own subtree (the WGD branch plus
+all descendants) with its own `r`; branches below no WGD stay at `r = 1` (inert
+there, since no unresolved mass reaches them). This requires the WGD subtrees to
+be **disjoint**: with multiple `--wgd` under `--lore`, if one WGD is ancestral to
+another the run aborts (per-event `r` is unidentifiable on the shared branches —
+the single U-channel per branch cannot record which WGD a U-lineage descends
+from). A WGD on a **terminal** branch governs only its own branch (no descendant
+lineage to delay resolution to), so its `r` is **pinned to 1 (AORe)** and excluded
+from the free parameters. Because the LORe model *nests* AORe (`r = 1`), the fit
+is guarded to never score below the AORe optimum: with no delayed-resolution
+signal, `r̂ → 1` and the LRT ties. (Nested WGDs **without** `--lore` are fine — the
+per-branch WGD transform is local, so stacked `q`'s compose and each is estimated
+independently under AORe.)
 
 ### Reading out *where* rediploidization happened
 The resolution **branch** is not a parameter — it is a **posterior marginal**
-read out (under the fitted global `r`) by a *U-aware backtrace*: the
+read out (under each WGD's fitted `r`) by a *U-aware backtrace*: the
 reconciliation sampler is extended with the U state and a U→R **commit** event
 that records the species branch where each ohnolog pair diverged. Every sampling
 weight equals the exact inside-likelihood term (an always-on consistency guard
@@ -228,7 +239,7 @@ On a controlled toy (WGD on the LCA branch, D/L fixed):
 | ohnolog-grouped `((Aa,Ba),(Ab,Bb))` (true AORe) | **1.0** | the WGD branch (≈1), terminals 0 |
 
 So the highest-posterior commit branch matches the simulated truth in both cases,
-under the fitted global `r`, with no per-branch tuning. On `example-1` (no LORe
+under the fitted `r`, with no per-branch tuning. On `example-1` (no LORe
 signal) `r̂ → 1` and the model ties AORe.
 
 > **Use it:** add `--lore` to a `--wgd` run (DL model). Without `--lore`, `r = 1`
@@ -240,9 +251,9 @@ signal) `r̂ → 1` and the model ties AORe.
   ohnolog-grouped ohnologs). If the CCPs don't carry multi-species ohnolog
   structure, `r` trades off against loss/retention and `r̂` is not meaningful —
   check the input actually contains that signal before interpreting it.
-- The resolution branch is a *posterior readout under one global `r`*, not a free
-  per-branch rate; and the timing is a resolution **branch**, not a dated time
-  (the undated model infers *where*, not *when*).
+- The resolution branch is a *posterior readout under the fitted `r`* (one `r`
+  per declared WGD), not a free per-branch rate; and the timing is a resolution
+  **branch**, not a dated time (the undated model infers *where*, not *when*).
 - Implemented for both the DL and the DTL model (`--lore` accepts
   `--rec-model UndatedDL` or `UndatedDTL`). In the DTL model the unresolved
   (tetrasomic) state propagates **vertically only**: transfers act on resolved
@@ -290,6 +301,10 @@ cmake --build . --target kalerax wgd_regression lore_marginal -j4
 
 # DTL+LORe regression gate (null <= AORe <= LORe on validation/example-1):
 bash tests/dtl_lore_regression.sh ./bin/kalerax
+
+# Per-event r gate (two disjoint WGDs -> distinct r-hat; terminal pinning;
+# nested-abort) on a synthetic two-clade input, for UndatedDL AND UndatedDTL:
+bash tests/multi_wgd_regression.sh ./bin/kalerax
 
 # WHALE benchmark inputs and the exact run recipe:
 #   validation/example-1/README.md

@@ -10,8 +10,10 @@
 > likelihood — letting you test WGD hypotheses the way
 > [WHALE](https://github.com/arzwa/Whale.jl) does, but on AleRax's amalgamated
 > DL and DTL likelihoods. It also models **lineage-specific rediploidization
-> (LORe)** via `--lore` — delayed ohnolog divergence with a fitted global
-> resolution probability `r` — for **both** the DL and the DTL model.
+> (LORe)** via `--lore` — delayed ohnolog divergence with a fitted resolution
+> probability `r` **per declared WGD** (disjoint WGD subtrees; a WGD on a
+> terminal branch has its `r` pinned to 1/AORe) — for **both** the DL and the
+> DTL model.
 >
 > 📄 **Start here: [`WGD_REPORT.md`](WGD_REPORT.md)** — a short, readable report
 > covering the implementation, a benchmark against WHALE, and what allowing
