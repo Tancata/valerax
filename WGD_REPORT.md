@@ -76,6 +76,33 @@ maximum likelihood (reparameterised as `q = r/(1+r)`, `r ≥ 0`), in a dedicated
 optimisation pass that runs even when D/L rates are fixed — so `q` can be
 estimated against a fixed-rate background for a clean likelihood-ratio test.
 
+### Controlling output volume (`--summary-only`)
+A normal run writes the **full per-sample reconciliation** of every gene family
+to `reconciliations/all/` — for each family, the sampled gene trees, a
+RecPhyloXML file *per sample*, and per-sample event/transfer counts. On large
+datasets (many families × many `-g` samples) this is the dominant cost and can
+reach **tens of GB**, even though most analyses only consume the summaries.
+
+`--summary-only` suppresses that bulk while keeping everything an aggregate
+analysis needs:
+
+| Kept | Dropped |
+|---|---|
+| `reconciliations/summaries/<fam>_*` (consensus tree, mean species-event / transfer / resolution counts) | `reconciliations/all/<fam>_*` (per-sample trees, RecPhyloXML, `.alerec`, per-sample event/transfer counts) |
+| `reconciliations/{totalSpeciesEventCounts,totalTransfers,totalSpeciesResolutionCounts,totalSpeciesTetrasomyCounts}.txt` | `highways/candidate_tests/` (per-candidate per-family LL diffs) |
+| `reconciliations/wgdSummary.txt`, `species_trees/`, `model_parameters/`, the gene-family origins, accepted highways, and all `*.log` files | the CCP binaries `ccps/*.ccp` (cleaned up, as with `--cleanup-ccp`) |
+
+```sh
+kalerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+        --wgd ATHA,ATRI --lore --summary-only -p out
+```
+The per-family summaries are still produced exactly as in a full run — under the
+hood the few per-sample files they are built from are written transiently and
+deleted as soon as each family's summary is computed, so peak disk use stays at
+roughly one family rather than the whole dataset. The numerical results
+(likelihoods, `q̂`, `r̂`, the resolution profile) are identical; only the bulky
+per-sample artefacts are absent.
+
 ### Tests
 `tests/wgd_regression.cpp` (CMake target `wgd_regression`) checks:
 1. **no-WGD == stock AleRax** likelihood, to the bit
@@ -218,6 +245,19 @@ ask "did *this* WGD rediploidize late?" without forcing every declared WGD to be
 disjoint. `--lore-wgd` implies LORe and is mutually exclusive with bare `--lore`
 (which fits every internal WGD). Non-target WGDs are logged as `(pinned;non-target)`,
 terminal ones as `(pinned;terminal)`.
+
+```sh
+# Two WGDs, but only test the (nested) inner one for late rediploidization:
+kalerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+        --gene-tree-rooting UNIFORM --species-tree-search SKIP \
+        --wgd OUTER1,OUTER2 --wgd INNER1,INNER2 --lore-wgd INNER1,INNER2 -p out
+```
+The fit log then reports a free `r` for the target and `r = 1` for the rest, e.g.
+`... r[node 7]=0.59 r[node 6]=1(pinned;non-target)`, and every declared WGD's
+fitted `q`, fitted `r`, and resolution status is written to
+`out/reconciliations/wgdSummary.txt` (one row per `--wgd`). Pass `--lore-wgd`
+more than once to fit several targets at once; the targets must still be
+mutually disjoint (only the *non-target* WGDs may be nested freely).
 
 ### Reading out *where* rediploidization happened
 The resolution **branch** is not a parameter — it is a **posterior marginal**
