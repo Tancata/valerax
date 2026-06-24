@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <memory>
 
 #include <IO/FileSystem.hpp>
 #include <IO/Logger.hpp>
@@ -500,20 +501,23 @@ void AleOptimizer::reconcile(unsigned int samples) {
     // resolution profile below is computed by a separate, robust backtrace.
     unsigned int sampledScenarios = scenarios.size();
     // (LORe resolution profile is sampled in PASS B below, at the fitted r.)
-    // writing in the reconciliations/all/ dir
+    // writing in the reconciliations/all/ dir. Under --summary-only we suppress
+    // the bulky per-sample output (RecPhyloXML, .alerec, per-sample total event
+    // counts) entirely, and write only what the kept per-family summaries are
+    // built from (the sampled newick for the consensus, and the per-species
+    // event / transfer counts for the means); those transient files are deleted
+    // at the end of this family's iteration so peak disk stays at one family.
+    const bool summaryOnly = _evaluator->isSummaryOnly();
     auto geneTreesPath = FileSystem::joinPaths(
         allRecDir, localFamilies[i].name + "_samples.newick");
     ParallelOfstream geneTreesOs(geneTreesPath, false);
     auto geneTreesAlePath = FileSystem::joinPaths(
         allRecDir, localFamilies[i].name + "_samples.alerec");
-    ParallelOfstream geneTreesAleOs(geneTreesAlePath, false);
+    std::unique_ptr<ParallelOfstream> geneTreesAleOs;
+    if (!summaryOnly) {
+      geneTreesAleOs.reset(new ParallelOfstream(geneTreesAlePath, false));
+    }
     for (unsigned int sample = 0; sample < sampledScenarios; ++sample) {
-      auto geneTreeXMLPath =
-          FileSystem::joinPaths(allRecDir, localFamilies[i].name + "_sample_" +
-                                               std::to_string(sample) + ".xml");
-      auto eventCountsFile = FileSystem::joinPaths(
-          allRecDir, localFamilies[i].name + "_eventCounts_" +
-                         std::to_string(sample) + ".txt");
       auto perSpeciesEventCountsFile = FileSystem::joinPaths(
           allRecDir, localFamilies[i].name + "_speciesEventCounts_" +
                          std::to_string(sample) + ".txt");
@@ -525,10 +529,18 @@ void AleOptimizer::reconcile(unsigned int samples) {
       auto &scenario = *scenarios[sample];
       scenario.saveReconciliation(geneTreesOs,
                                   ReconciliationFormat::NewickEvents);
-      scenario.saveReconciliation(geneTreesAleOs, ReconciliationFormat::ALE);
-      scenario.saveReconciliation(geneTreeXMLPath,
-                                  ReconciliationFormat::RecPhyloXML, false);
-      scenario.saveEventsCounts(eventCountsFile, false);
+      if (!summaryOnly) {
+        auto geneTreeXMLPath = FileSystem::joinPaths(
+            allRecDir, localFamilies[i].name + "_sample_" +
+                           std::to_string(sample) + ".xml");
+        auto eventCountsFile = FileSystem::joinPaths(
+            allRecDir, localFamilies[i].name + "_eventCounts_" +
+                           std::to_string(sample) + ".txt");
+        scenario.saveReconciliation(*geneTreesAleOs, ReconciliationFormat::ALE);
+        scenario.saveReconciliation(geneTreeXMLPath,
+                                    ReconciliationFormat::RecPhyloXML, false);
+        scenario.saveEventsCounts(eventCountsFile, false);
+      }
       scenario.savePerSpeciesEventsCounts(perSpeciesEventCountsFile, false);
       scenario.saveTransfers(transferFile, false);
       for (unsigned int hi = 0; hi < highways.size(); ++hi) {
@@ -540,7 +552,9 @@ void AleOptimizer::reconcile(unsigned int samples) {
       perHighwayPerFamTransfers[hi][i] /= static_cast<double>(samples);
     }
     geneTreesOs.close();
-    geneTreesAleOs.close();
+    if (geneTreesAleOs) {
+      geneTreesAleOs->close();
+    }
     // writing in the reconciliations/summaries/ dir (skip for the rare families
     // with no sampled gene tree -- see the sampledScenarios note above)
     if (sampledScenarios > 0) {
@@ -558,6 +572,17 @@ void AleOptimizer::reconcile(unsigned int samples) {
       Scenario::mergeTransfers(getSpeciesTree().getTree(), transferFile,
                                transferFiles, false, true);
       summaryTransferFiles.push_back(transferFile);
+    }
+    // --summary-only: the per-family summaries are now built, so drop the
+    // transient per-sample files (each rank wrote its own local families).
+    if (summaryOnly) {
+      std::remove(geneTreesPath.c_str());
+      for (const auto &f : perSpeciesEventCountsFiles) {
+        std::remove(f.c_str());
+      }
+      for (const auto &f : transferFiles) {
+        std::remove(f.c_str());
+      }
     }
   }
   ParallelContext::barrier();

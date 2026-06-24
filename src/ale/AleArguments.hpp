@@ -73,6 +73,11 @@ public:
   std::vector<WGDDeclaration> wgds;
   // LORe: estimate a (global) delayed-rediploidization resolution prob r
   bool lore;
+  // LORe restricted to specific WGD(s): each entry names (by 1 or 2 taxon
+  // labels, like --wgd) a declared WGD whose resolution r is fitted; every
+  // other declared WGD is pinned to AORe (r=1). Unlike bare --lore this allows
+  // the LORe-tested WGD to be nested within (AORe) WGDs. q0 is ignored here.
+  std::vector<WGDDeclaration> loreWgds;
 
   // model
   std::string reconciliationModelStr;
@@ -117,6 +122,10 @@ public:
   std::string output;
   unsigned int geneTreeSamples;
   bool cleanupCCP;
+  // suppress the bulky per-family/per-sample output (reconciliations/all/,
+  // RecPhyloXML, highway candidate tests, CCP binaries); keep the summaries,
+  // global totals, wgdSummary, species trees, model parameters and logs.
+  bool summaryOnly;
 
   // random seed
   int seed;

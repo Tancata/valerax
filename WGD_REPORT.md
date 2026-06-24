@@ -207,6 +207,18 @@ signal, `r̂ → 1` and the LRT ties. (Nested WGDs **without** `--lore` are fine
 per-branch WGD transform is local, so stacked `q`'s compose and each is estimated
 independently under AORe.)
 
+**Testing LORe for one WGD only (`--lore-wgd`).** Use `--lore-wgd LABEL[,LABEL2]`
+(same label syntax as `--wgd`, repeatable) to fit `r` for a **specific** declared
+WGD while every other `--wgd` is pinned to AORe (`r = 1`). Only the named targets
+have a free `r`, so the disjointness requirement applies **only among the
+targets** — a LORe-tested WGD may now be **nested inside** an AORe-pinned WGD (an
+AORe WGD resolves at its own branch and sends no unresolved mass downward, so the
+shared branches carry only the inner target's `r`). This is the supported way to
+ask "did *this* WGD rediploidize late?" without forcing every declared WGD to be
+disjoint. `--lore-wgd` implies LORe and is mutually exclusive with bare `--lore`
+(which fits every internal WGD). Non-target WGDs are logged as `(pinned;non-target)`,
+terminal ones as `(pinned;terminal)`.
+
 ### Reading out *where* rediploidization happened
 The resolution **branch** is not a parameter — it is a **posterior marginal**
 read out (under each WGD's fitted `r`) by a *U-aware backtrace*: the
@@ -299,11 +311,20 @@ cmake --build . --target kalerax wgd_regression lore_marginal -j4
 #   (--rec-model UndatedDTL also supported for --lore; see DTL_LORE.md)
 #   -> out/reconciliations/{totalSpeciesResolutionCounts,wgdSummary}.txt
 
+# test LORe for ONE WGD only (may be nested inside other, AORe-pinned WGDs):
+./bin/kalerax -f families.txt -s species_tree.nw --rec-model UndatedDL \
+  --gene-tree-rooting UNIFORM --species-tree-search SKIP \
+  --wgd OUTER1,OUTER2 --wgd INNER1,INNER2 --lore-wgd INNER1,INNER2 -p out
+
+# suppress the bulky per-family output (GB-scale); keep summaries + logs:
+./bin/kalerax ... --wgd ... --lore --summary-only -p out
+
 # DTL+LORe regression gate (null <= AORe <= LORe on validation/example-1):
 bash tests/dtl_lore_regression.sh ./bin/kalerax
 
-# Per-event r gate (two disjoint WGDs -> distinct r-hat; terminal pinning;
-# nested-abort) on a synthetic two-clade input, for UndatedDL AND UndatedDTL:
+# Per-event r gate (disjoint WGDs -> distinct r-hat; terminal pinning; nested
+# abort; --lore-wgd single-target incl. nested; --summary-only suppression) on a
+# synthetic two-clade input, for UndatedDL AND UndatedDTL:
 bash tests/multi_wgd_regression.sh ./bin/kalerax
 
 # WHALE benchmark inputs and the exact run recipe:

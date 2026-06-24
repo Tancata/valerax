@@ -63,7 +63,7 @@ AleArguments::AleArguments(int iargc, char **iargv)
       trimFamilyRatio(DEFAULT_TRIM_FAMILY_RATIO),
       maxCladeSplitRatio(DEFAULT_MAX_SPLIT_RATIO),
       sampleFrequency(DEFAULT_SAMPLE_FREQUENCY), output("alerax_output"),
-      geneTreeSamples(100), cleanupCCP(false), seed(123),
+      geneTreeSamples(100), cleanupCCP(false), summaryOnly(false), seed(123),
       randomSpeciesRoot(false), optVerbose(false) {
   if (argc == 1) {
     printHelp();
@@ -111,6 +111,10 @@ AleArguments::AleArguments(int iargc, char **iargv)
       wgds.push_back(parseWGDDeclaration(std::string(argv[++i])));
     } else if (arg == "--lore") {
       lore = true;
+    } else if (arg == "--lore-wgd") {
+      loreWgds.push_back(parseWGDDeclaration(std::string(argv[++i])));
+    } else if (arg == "--summary-only") {
+      summaryOnly = true;
     } else if (arg == "--d") {
       d = atof(argv[++i]);
     } else if (arg == "--l") {
@@ -410,6 +414,11 @@ void AleArguments::printHelp() const {
   Logger::info << "\t-g, --gene-tree-samples <number of samples>" << std::endl;
   Logger::info << "\t--seed <seed>" << std::endl;
   Logger::info << "\t--cleanup-ccp" << std::endl;
+  Logger::info << "\t--summary-only (suppress the bulky per-family output: the "
+               << "reconciliations/all/ samples, RecPhyloXML, highway candidate "
+               << "tests and CCP binaries; keep the summaries, global totals, "
+               << "wgdSummary, species trees, model parameters and logs)"
+               << std::endl;
 
   Logger::info << "Reconciliation model options:" << std::endl;
   Logger::info << "\t-r, --rec-model <reconciliation model> "
@@ -440,6 +449,13 @@ void AleArguments::printHelp() const {
                << "subtrees to be disjoint; a WGD on a terminal branch has its "
                << "r pinned to 1/AORe); requires --wgd and --rec-model "
                << "UndatedDL or UndatedDTL)"
+               << std::endl;
+  Logger::info << "\t--lore-wgd <LABEL[,LABEL2]> (fit the LORe resolution r for "
+               << "this declared WGD only; every other --wgd is pinned to "
+               << "1/AORe. Unlike --lore this allows the tested WGD to be nested "
+               << "within other (AORe) WGDs. Repeatable; selected WGDs must be "
+               << "mutually disjoint. Implies LORe; mutually exclusive with "
+               << "--lore)"
                << std::endl;
 
   Logger::info << "Search strategy options:" << std::endl;
@@ -532,16 +548,24 @@ void AleArguments::checkValid() const {
                  << "with --no-tl" << std::endl;
   }
   // LORe block
-  if (lore) {
+  if (lore && !loreWgds.empty()) {
+    ok = false;
+    Logger::info << "\nError: --lore and --lore-wgd are mutually exclusive "
+                 << "(--lore fits r for all disjoint WGDs; --lore-wgd targets "
+                 << "specific WGDs)" << std::endl;
+  }
+  if (lore || !loreWgds.empty()) {
+    const std::string driver = lore ? "--lore" : "--lore-wgd";
     if (wgds.empty()) {
       ok = false;
-      Logger::info << "\nError: --lore requires at least one --wgd" << std::endl;
+      Logger::info << "\nError: " << driver << " requires at least one --wgd"
+                   << std::endl;
     }
     if (reconciliationModelStr != "UndatedDL" &&
         reconciliationModelStr != "UndatedDTL") {
       ok = false;
-      Logger::info << "\nError: --lore requires --rec-model UndatedDL or "
-                   << "UndatedDTL" << std::endl;
+      Logger::info << "\nError: " << driver << " requires --rec-model UndatedDL "
+                   << "or UndatedDTL" << std::endl;
     }
   }
   if (d <= 0.0 || l <= 0.0 || t <= 0.0) {

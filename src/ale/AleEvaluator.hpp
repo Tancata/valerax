@@ -184,6 +184,28 @@ public:
   bool optimizesResolution() const { return _optimizeResolution; }
 
   /**
+   *  Restrict LORe to a specific declared WGD (by node index): only the
+   *  registered targets get a free resolution r; every other WGD is pinned to
+   *  AORe (r=1). When no target is registered, every internal-branch WGD is
+   *  resolvable (the default --lore behaviour). Targets must sit on declared
+   *  WGD branches and be mutually disjoint, but may be nested inside (pinned)
+   *  WGDs. Consumed by buildWGDStructure().
+   */
+  void addResolutionTarget(unsigned int speciesNode) {
+    _loreTargets.push_back(speciesNode);
+  }
+  const std::vector<unsigned int> &getResolutionTargets() const {
+    return _loreTargets;
+  }
+
+  /**
+   *  Suppress the bulky per-family/per-sample output (--summary-only). Read by
+   *  AleOptimizer::reconcile() and the highway candidate tests.
+   */
+  void setSummaryOnly(bool on) { _summaryOnly = on; }
+  bool isSummaryOnly() const { return _summaryOnly; }
+
+  /**
    *  Optimize the model rates
    */
   virtual double optimizeModelRates(bool thorough);
@@ -308,8 +330,13 @@ private:
   std::vector<double> _wgdResolution;
   std::vector<std::vector<unsigned int>> _wgdSubtreeBranches;
   std::vector<char> _wgdResolvable;
+  // node indices of the WGDs whose r is fitted under --lore-wgd (empty => every
+  // internal-branch WGD is resolvable, i.e. the default --lore behaviour).
+  std::vector<unsigned int> _loreTargets;
   double _resolutionProb = 1.0;
   bool _optimizeResolution = false;
+  // suppress the bulky per-family output (--summary-only)
+  bool _summaryOnly = false;
   std::vector<int> _highPrecisions;
   // LL buffer for global families
   std::vector<double> _snapshotPerFamilyLL;

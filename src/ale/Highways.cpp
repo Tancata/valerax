@@ -70,10 +70,13 @@ static double testHighwayFast(AleEvaluator &evaluator, const Highway &highway,
   highwayCopy.proba = highwayProba;
   evaluator.addHighway(highwayCopy);
   double ll = evaluator.computeLikelihood();
-  auto out = FileSystem::joinPaths(directory, std::string("transferll_") +
-                                                  highway.src->label + "_to_" +
-                                                  highway.dest->label + ".txt");
-  evaluator.savePerFamilyLikelihoodDiff(out);
+  // --summary-only suppresses the per-candidate per-family LL diff files.
+  if (!evaluator.isSummaryOnly()) {
+    auto out = FileSystem::joinPaths(directory, std::string("transferll_") +
+                                                    highway.src->label + "_to_" +
+                                                    highway.dest->label + ".txt");
+    evaluator.savePerFamilyLikelihoodDiff(out);
+  }
   evaluator.removeHighway();
   return ll;
 }
@@ -224,7 +227,9 @@ void Highways::filterCandidateHighways(
       evaluator.getInputTreesNumber(); // input data size for BIC calculation
   auto testPath = FileSystem::joinPaths(optimizer.getHighwaysOutputDir(),
                                         "candidate_tests");
-  FileSystem::mkdir(testPath, true);
+  if (!evaluator.isSummaryOnly()) {
+    FileSystem::mkdir(testPath, true);
+  }
   ParallelContext::barrier();
   Logger::timed << "[Highway search] Filtering candidate highways that "
                 << "increase LL by more than " << minDiff << std::endl;

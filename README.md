@@ -13,7 +13,10 @@
 > (LORe)** via `--lore` — delayed ohnolog divergence with a fitted resolution
 > probability `r` **per declared WGD** (disjoint WGD subtrees; a WGD on a
 > terminal branch has its `r` pinned to 1/AORe) — for **both** the DL and the
-> DTL model.
+> DTL model. `--lore-wgd LABEL[,LABEL2]` instead tests LORe for one specific WGD
+> (which may be **nested inside** other, AORe-pinned WGDs), and `--summary-only`
+> suppresses the bulky per-family output (keeping the summaries, `wgdSummary.txt`
+> and logs) for large runs.
 >
 > 📄 **Start here: [`WGD_REPORT.md`](WGD_REPORT.md)** — a short, readable report
 > covering the implementation, a benchmark against WHALE, and what allowing

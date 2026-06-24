@@ -238,6 +238,9 @@ void AleEvaluator::buildWGDStructure() {
   const unsigned int n = _wgdNodes.size();
   _wgdSubtreeBranches.assign(n, {});
   _wgdResolvable.assign(n, 0);
+  // When --lore-wgd named specific targets, only those WGDs are resolvable;
+  // otherwise (bare --lore) every internal-branch WGD is.
+  const bool restricted = !_loreTargets.empty();
   for (unsigned int j = 0; j < n; ++j) {
     const unsigned int w = _wgdNodes[j];
     for (auto node : tree.getNodes()) {
@@ -246,26 +249,35 @@ void AleEvaluator::buildWGDStructure() {
         _wgdSubtreeBranches[j].push_back(e);
       }
     }
-    // internal WGD (subtree has descendants) => r is a free parameter; a
-    // terminal WGD governs only its own branch => r unidentifiable, pinned.
-    _wgdResolvable[j] = (_wgdSubtreeBranches[j].size() > 1) ? 1 : 0;
+    // internal WGD (subtree has descendants) => r is a candidate free parameter;
+    // a terminal WGD governs only its own branch => r unidentifiable, pinned.
+    bool internal = (_wgdSubtreeBranches[j].size() > 1);
+    bool selected =
+        !restricted || (std::find(_loreTargets.begin(), _loreTargets.end(), w) !=
+                        _loreTargets.end());
+    _wgdResolvable[j] = (internal && selected) ? 1 : 0;
   }
-  if (_optimizeResolution && n > 1) {
+  // Per-event r is only identifiable when no species branch lies below two
+  // *free-r* WGDs (the U-mass recursion carries a single r per branch). A pinned
+  // (AORe) WGD resolves at its own branch and sends no U-mass downward, so it
+  // may be nested with a free-r WGD; only the free-r set must be disjoint.
+  if (_optimizeResolution) {
     std::vector<int> owner(tree.getNodeNumber(), -1); // branch -> WGD idx, -1=none
     for (unsigned int j = 0; j < n; ++j) {
+      if (!_wgdResolvable[j]) {
+        continue;
+      }
       for (auto e : _wgdSubtreeBranches[j]) {
         if (owner[e] >= 0) {
           Logger::error
-              << "Error: --lore with multiple --wgd requires DISJOINT WGD "
-                 "subtrees. "
+              << "Error: the LORe-tested WGDs must have DISJOINT subtrees. "
               << "Per-event resolution r is only identifiable when no species "
-                 "branch "
-              << "lies below two declared WGDs, but the WGDs at nodes "
+                 "branch lies below two fitted WGDs, but the WGDs at nodes "
               << _wgdNodes[owner[e]] << " and " << _wgdNodes[j]
               << " are nested (branch " << e << " is below both). "
-              << "Re-run with disjoint WGDs, or drop --lore (per-event q is "
-                 "still "
-              << "estimated under AORe with nested WGDs)." << std::endl;
+              << "Use --lore-wgd to fit r for a single WGD (which may be nested "
+                 "inside other, AORe-pinned WGDs), or re-run with disjoint "
+                 "LORe-tested WGDs." << std::endl;
           ParallelContext::abort(1);
         }
         owner[e] = static_cast<int>(j);
@@ -284,9 +296,22 @@ void AleEvaluator::setWGDResolutions(const std::vector<double> &rPerWGD) {
       break;
     }
   }
-  // paint a per-branch vector: 1.0 everywhere, then each WGD's subtree with its r
-  std::vector<double> perBranch(_speciesTree.getTree().getNodeNumber(), 1.0);
+  // paint a per-branch vector: 1.0 everywhere, then each WGD's subtree with its
+  // r. On a branch shared by nested WGDs the deepest (most derived) WGD must
+  // win: an enclosing AORe WGD resolves at its own branch and sends no U-mass
+  // down, so the branch effectively carries only the inner WGD's resolution. We
+  // therefore paint ancestors first (largest subtree first); descendants, whose
+  // subtree is strictly smaller, overwrite them. Disjoint WGDs never overlap, so
+  // this is order-independent for them (bit-for-bit identical to before).
+  std::vector<unsigned int> order(_wgdNodes.size());
   for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
+    order[j] = j;
+  }
+  std::sort(order.begin(), order.end(), [&](unsigned int a, unsigned int b) {
+    return _wgdSubtreeBranches[a].size() > _wgdSubtreeBranches[b].size();
+  });
+  std::vector<double> perBranch(_speciesTree.getTree().getNodeNumber(), 1.0);
+  for (auto j : order) {
     for (auto e : _wgdSubtreeBranches[j]) {
       perBranch[e] = rPerWGD[j];
     }
@@ -485,7 +510,8 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
                   << _wgdNodes.size() << " branch(es)";
     if (_optimizeResolution) {
       Logger::info << " + per-event LORe r (" << nFreeR << " free, "
-                   << (_wgdNodes.size() - nFreeR) << " pinned:terminal)";
+                   << (_wgdNodes.size() - nFreeR)
+                   << " pinned:terminal/non-target)";
     }
     Logger::info << ", ll=" << ll << std::endl;
     OptimizationSettings settings;
@@ -521,7 +547,11 @@ double AleEvaluator::optimizeModelRates(bool thorough) {
       for (unsigned int j = 0; j < _wgdNodes.size(); ++j) {
         Logger::info << " r[node " << _wgdNodes[j] << "]=" << _wgdResolution[j];
         if (j >= _wgdResolvable.size() || !_wgdResolvable[j]) {
-          Logger::info << "(pinned;terminal)";
+          // terminal-branch WGDs are unidentifiable; internal WGDs that are not
+          // a --lore-wgd target are pinned to AORe by choice.
+          bool terminal =
+              (j < _wgdSubtreeBranches.size() && _wgdSubtreeBranches[j].size() <= 1);
+          Logger::info << (terminal ? "(pinned;terminal)" : "(pinned;non-target)");
         }
       }
     };

@@ -1,5 +1,7 @@
 #include <cassert>
 #include <cstdio>
+#include <set>
+#include <unordered_map>
 
 #include <DistanceMethods/MiniNJ.hpp>
 #include <IO/FamiliesFileParser.hpp>
@@ -498,6 +500,38 @@ void runReconciliationInference(const AleArguments &args,
  *  declared here is only meaningful while the topology is fixed. --wgd is
  *  therefore intended for use with --species-tree-search SKIP.
  */
+// Resolve a WGD declaration (1 or 2 taxon labels) to a species-tree node. A
+// single label selects that terminal branch; two labels select the branch
+// leading to their LCA. `flag` names the option for error messages.
+static corax_rnode_t *
+resolveWGDNode(PLLRootedTree &speciesTree,
+               const std::unordered_map<std::string, corax_rnode_t *> &labelToNode,
+               const WGDDeclaration &wgd, const std::string &flag) {
+  if (wgd.labels.size() == 1) {
+    auto it = labelToNode.find(wgd.labels[0]);
+    if (it == labelToNode.end()) {
+      Logger::error << "Error: " << flag << " label '" << wgd.labels[0]
+                    << "' was not found in the species tree" << std::endl;
+      ParallelContext::abort(1);
+    }
+    return it->second;
+  } else if (wgd.labels.size() == 2) {
+    auto it1 = labelToNode.find(wgd.labels[0]);
+    auto it2 = labelToNode.find(wgd.labels[1]);
+    if (it1 == labelToNode.end() || it2 == labelToNode.end()) {
+      Logger::error << "Error: " << flag << " labels '" << wgd.labels[0]
+                    << "' and '" << wgd.labels[1]
+                    << "' were not both found in the species tree" << std::endl;
+      ParallelContext::abort(1);
+    }
+    return speciesTree.getLCA(it1->second, it2->second);
+  }
+  Logger::error << "Error: " << flag << " expects 1 or 2 taxon labels"
+                << std::endl;
+  ParallelContext::abort(1);
+  return nullptr;
+}
+
 void declareWGDs(const AleArguments &args, AleOptimizer &optimizer) {
   if (args.wgds.empty()) {
     return;
@@ -513,46 +547,50 @@ void declareWGDs(const AleArguments &args, AleOptimizer &optimizer) {
   auto &speciesTree = optimizer.getSpeciesTree().getTree();
   auto labelToNode = speciesTree.getLabelToNode(false);
   auto &evaluator = optimizer.getEvaluator();
+  std::set<unsigned int> declaredNodes;
   for (const auto &wgd : args.wgds) {
-    corax_rnode_t *node = nullptr;
-    if (wgd.labels.size() == 1) {
-      auto it = labelToNode.find(wgd.labels[0]);
-      if (it == labelToNode.end()) {
-        Logger::error << "Error: --wgd label '" << wgd.labels[0]
-                      << "' was not found in the species tree" << std::endl;
-        ParallelContext::abort(1);
-      }
-      node = it->second;
-    } else if (wgd.labels.size() == 2) {
-      auto it1 = labelToNode.find(wgd.labels[0]);
-      auto it2 = labelToNode.find(wgd.labels[1]);
-      if (it1 == labelToNode.end() || it2 == labelToNode.end()) {
-        Logger::error << "Error: --wgd labels '" << wgd.labels[0] << "' and '"
-                      << wgd.labels[1]
-                      << "' were not both found in the species tree"
-                      << std::endl;
-        ParallelContext::abort(1);
-      }
-      node = speciesTree.getLCA(it1->second, it2->second);
-    } else {
-      Logger::error << "Error: --wgd expects 1 or 2 taxon labels" << std::endl;
-      ParallelContext::abort(1);
-    }
+    auto *node = resolveWGDNode(speciesTree, labelToNode, wgd, "--wgd");
     evaluator.setWGD(node->node_index, wgd.q0);
+    declaredNodes.insert(node->node_index);
     Logger::timed << "Declared a WGD at the top of the branch leading to node "
                   << node->node_index << " (label: "
                   << (node->label ? node->label : "<internal>")
                   << "), starting retention q=" << wgd.q0 << std::endl;
   }
-  // LORe: enable joint estimation of a per-event resolution probability r (one
-  // per declared WGD with an internal-branch subtree; start near-AORe at r=0.9).
-  // r=1 is the WHALE/AORe limit; terminal-branch WGDs keep r pinned to 1.
-  if (args.lore) {
+  // --lore-wgd: fit r only for the named WGD(s); register them as resolution
+  // targets so every other declared WGD is pinned to AORe (r=1).
+  for (const auto &wgd : args.loreWgds) {
+    auto *node = resolveWGDNode(speciesTree, labelToNode, wgd, "--lore-wgd");
+    if (declaredNodes.find(node->node_index) == declaredNodes.end()) {
+      Logger::error << "Error: --lore-wgd node " << node->node_index
+                    << " (label: " << (node->label ? node->label : "<internal>")
+                    << ") is not a declared WGD; add a matching --wgd"
+                    << std::endl;
+      ParallelContext::abort(1);
+    }
+    evaluator.addResolutionTarget(node->node_index);
+    Logger::timed << "LORe target: will fit the resolution r of the WGD on the "
+                  << "branch leading to node " << node->node_index << " (label: "
+                  << (node->label ? node->label : "<internal>") << ")"
+                  << std::endl;
+  }
+  // LORe: enable joint estimation of a per-event resolution probability r (start
+  // near-AORe at r=0.9). With bare --lore every internal-branch WGD is fitted;
+  // with --lore-wgd only the registered targets are. r=1 is the WHALE/AORe
+  // limit; terminal-branch WGDs (and, under --lore-wgd, non-targets) keep r=1.
+  if (args.lore || !args.loreWgds.empty()) {
     evaluator.setResolutionProb(0.9);
     evaluator.enableResolutionOptimization(true);
-    Logger::timed << "LORe enabled: will estimate a per-event resolution "
-                  << "probability r per declared WGD (starting r=0.9)"
-                  << std::endl;
+    if (args.loreWgds.empty()) {
+      Logger::timed << "LORe enabled: will estimate a per-event resolution "
+                    << "probability r per declared WGD (starting r=0.9)"
+                    << std::endl;
+    } else {
+      Logger::timed << "LORe enabled (--lore-wgd): will estimate r for "
+                    << args.loreWgds.size()
+                    << " targeted WGD(s); all others pinned to AORe r=1 "
+                    << "(starting r=0.9)" << std::endl;
+    }
   }
 }
 
@@ -603,6 +641,7 @@ void run(AleArguments &args) {
       args.speciesTree, families, info, args.modelParametrization,
       args.optimizationClassFile, startingRates, !args.fixRates,
       args.optVerbose, args.output);
+  speciesTreeOptimizer.getEvaluator().setSummaryOnly(args.summaryOnly);
   // declare any command-line WGDs on the (now constructed) species tree
   declareWGDs(args, speciesTreeOptimizer);
   if (!checkpointDetected) {
@@ -648,7 +687,7 @@ void run(AleArguments &args) {
   }
   // end of the run
   Logger::info << std::endl;
-  if (args.cleanupCCP) {
+  if (args.cleanupCCP || args.summaryOnly) {
     cleanupCCPs(families);
   }
   args.printWarning();
